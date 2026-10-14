@@ -1,0 +1,166 @@
+# Requests: path and query parameters, an object body, an array body, a body
+# property with the name of a parameter, headers and query options.
+
+- name: an object body is sent in wire names
+  client: { orgId: o1 }
+  call:
+    group: projects
+    method: create
+    request: { displayName: Demo, settings: { visibility: public, defaultBranch: main } }
+  exchanges:
+    - expect:
+        method: POST
+        path: /orgs/o1/projects
+        headers: { content-type: application/json }
+        body: { display_name: Demo, settings: { visibility: public, default_branch: main } }
+      respond:
+        status: 201
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: path and query parameters are sent with the body
+  call:
+    group: projects
+    method: update
+    request: { orgId: o1, projectId: p1, dryRun: true, displayName: Renamed }
+  exchanges:
+    - expect:
+        method: PATCH
+        path: /orgs/o1/projects/p1
+        query: { dry_run: 'true' }
+        body: { display_name: Renamed }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Renamed, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Renamed, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: path parameters are encoded
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: 'a b/c' }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o1/projects/a%20b%2Fc }
+      respond:
+        status: 200
+        body: { id: 'a b/c', display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: 'a b/c', displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: an array body is nested under body
+  call:
+    group: projects.members
+    method: replace
+    request:
+      orgId: o1
+      projectId: p1
+      body: [{ userId: u1, role: admin }, { userId: u2, role: viewer }]
+  exchanges:
+    - expect:
+        method: PUT
+        path: /orgs/o1/projects/p1/members
+        headers: { content-type: application/json }
+        body: [{ user_id: u1, role: admin }, { user_id: u2, role: viewer }]
+      respond:
+        status: 200
+        body: [{ user_id: u1, role: admin }, { user_id: u2, role: viewer }]
+  result:
+    response: [{ userId: u1, role: admin }, { userId: u2, role: viewer }]
+
+- name: a body with a property named like a parameter is nested under body
+  call:
+    group: projects
+    method: transfer
+    request:
+      orgId: o1
+      projectId: p1
+      body: { orgId: o2, note: moving }
+  exchanges:
+    - expect:
+        method: POST
+        path: /orgs/o1/projects/p1/transfer
+        body: { org_id: o2, note: moving }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: the token and the accepted type are sent
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect:
+        method: GET
+        path: /orgs/o1/projects/p1
+        headers: { authorization: Bearer conformance-token, accept: application/json }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: headers of the client and of the call are sent
+  client:
+    headers: { x-team: core }
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: p1 }
+    options:
+      headers: { x-request-id: req-1 }
+  exchanges:
+    - expect:
+        method: GET
+        path: /orgs/o1/projects/p1
+        headers: { x-team: core, x-request-id: req-1 }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: a header of the call replaces the same header of the client
+  client:
+    headers: { x-team: core }
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: p1 }
+    options:
+      headers: { x-team: platform }
+  exchanges:
+    - expect:
+        method: GET
+        path: /orgs/o1/projects/p1
+        headers: { x-team: platform }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: query options of the call are appended after those of the client
+  client:
+    query: { tag: a }
+  call:
+    group: projects
+    method: update
+    request: { orgId: o1, projectId: p1, dryRun: false, displayName: Demo }
+    options:
+      query: { tag: [b, c] }
+  exchanges:
+    - expect:
+        method: PATCH
+        path: /orgs/o1/projects/p1
+        query: { dry_run: 'false', tag: [a, b, c] }
+        body: { display_name: Demo }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }

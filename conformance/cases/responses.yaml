@@ -1,0 +1,46 @@
+# Responses: a response with no body, and two status codes with different
+# bodies.
+
+- name: a response with no body gives no value
+  call:
+    group: projects
+    method: delete
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect: { method: DELETE, path: /orgs/o1/projects/p1 }
+      respond:
+        status: 204
+  result:
+    response: null
+
+- name: the body of the first success status is decoded
+  call:
+    group: projects.members
+    method: add
+    request: { orgId: o1, projectId: p1, userId: u1, role: viewer }
+  exchanges:
+    - expect:
+        method: POST
+        path: /orgs/o1/projects/p1/members
+        body: { user_id: u1, role: viewer }
+      respond:
+        status: 201
+        body: { user_id: u1, role: viewer }
+  result:
+    response: { userId: u1, role: viewer }
+
+- name: the body of the second success status is decoded
+  call:
+    group: projects.members
+    method: add
+    request: { orgId: o1, projectId: p1, userId: u9, role: admin }
+  exchanges:
+    - expect:
+        method: POST
+        path: /orgs/o1/projects/p1/members
+        body: { user_id: u9, role: admin }
+      respond:
+        status: 202
+        body: { invitation_id: i1, status: pending }
+  result:
+    response: { invitationId: i1, status: pending }

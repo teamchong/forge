@@ -1,0 +1,642 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Forge conformance suite",
+    "version": "1",
+    "description": "A small API that has every pattern a forge SDK has to handle. See specs/conformance.md."
+  },
+  "security": [{ "bearer": [] }],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "x-fern-sdk-method-name": "health",
+        "responses": {
+          "200": {
+            "description": "The service is up.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" } } }
+          }
+        }
+      }
+    },
+    "/orgs/{org_id}/projects": {
+      "parameters": [{ "$ref": "#/components/parameters/OrgId" }],
+      "get": {
+        "operationId": "listProjects",
+        "x-fern-sdk-group-name": "projects",
+        "x-fern-sdk-method-name": "list",
+        "x-forge-pagination": {
+          "items": ".data",
+          "param": "cursor",
+          "next": ".next_cursor",
+          "more": ".next_cursor != null"
+        },
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "cursor", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of projects.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectPage" } } }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "x-fern-sdk-group-name": "projects",
+        "x-fern-sdk-method-name": "create",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectInput" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "The created project.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } }
+          }
+        }
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}": {
+      "parameters": [{ "$ref": "#/components/parameters/OrgId" }, { "$ref": "#/components/parameters/ProjectId" }],
+      "get": {
+        "operationId": "getProject",
+        "x-fern-sdk-group-name": "projects",
+        "x-fern-sdk-method-name": "get",
+        "responses": {
+          "200": {
+            "description": "The project.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } }
+          },
+          "404": {
+            "description": "There is no such project.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/not_found" } } }
+          },
+          "4XX": {
+            "description": "The request was refused.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorList" } } }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateProject",
+        "x-fern-sdk-group-name": "projects",
+        "x-fern-sdk-method-name": "update",
+        "parameters": [{ "name": "dry_run", "in": "query", "schema": { "type": "boolean" } }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectUpdate" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated project.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteProject",
+        "x-fern-sdk-group-name": "projects",
+        "x-fern-sdk-method-name": "delete",
+        "responses": {
+          "204": { "description": "The project was deleted." }
+        }
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/archive": {
+      "parameters": [{ "$ref": "#/components/parameters/OrgId" }, { "$ref": "#/components/parameters/ProjectId" }],
+      "post": {
+        "operationId": "archiveProject",
+        "x-fern-sdk-group-name": "projects",
+        "x-fern-sdk-method-name": "archive",
+        "responses": {
+          "200": {
+            "description": "The archived project.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } }
+          }
+        }
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/archive/restore": {
+      "parameters": [{ "$ref": "#/components/parameters/OrgId" }, { "$ref": "#/components/parameters/ProjectId" }],
+      "post": {
+        "operationId": "restoreProject",
+        "x-fern-sdk-group-name": ["projects", "archive"],
+        "x-fern-sdk-method-name": "restore",
+        "responses": {
+          "200": {
+            "description": "The restored project.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } }
+          }
+        }
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/transfer": {
+      "parameters": [{ "$ref": "#/components/parameters/OrgId" }, { "$ref": "#/components/parameters/ProjectId" }],
+      "post": {
+        "operationId": "transferProject",
+        "x-fern-sdk-group-name": "projects",
+        "x-fern-sdk-method-name": "transfer",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Transfer" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The transferred project.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Project" } } }
+          }
+        }
+      }
+    },
+    "/orgs/{org_id}/projects/{project_id}/members": {
+      "parameters": [{ "$ref": "#/components/parameters/OrgId" }, { "$ref": "#/components/parameters/ProjectId" }],
+      "get": {
+        "operationId": "listMembers",
+        "x-fern-sdk-group-name": "projects.members",
+        "x-fern-sdk-method-name": "list",
+        "x-forge-pagination": {
+          "items": ".data",
+          "param": "page",
+          "next": ".meta.page + 1",
+          "more": ".meta.page < .meta.total_pages"
+        },
+        "parameters": [
+          { "name": "per_page", "in": "query", "schema": { "type": "integer" } },
+          { "name": "page", "in": "query", "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of members.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MemberPage" } } }
+          }
+        }
+      },
+      "post": {
+        "operationId": "addMember",
+        "x-fern-sdk-group-name": "projects.members",
+        "x-fern-sdk-method-name": "add",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MemberInput" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "The user was added.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Member" } } }
+          },
+          "202": {
+            "description": "The user was invited.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Invitation" } } }
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceMembers",
+        "x-fern-sdk-group-name": "projects.members",
+        "x-fern-sdk-method-name": "replace",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "array", "items": { "$ref": "#/components/schemas/MemberInput" } }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The members now in the project.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Member" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/zones/{zone_id}/dns-records": {
+      "parameters": [{ "$ref": "#/components/parameters/ZoneId" }],
+      "get": {
+        "operationId": "listDnsRecords",
+        "x-fern-sdk-group-name": "dns-records",
+        "x-fern-sdk-method-name": "list_all",
+        "parameters": [
+          { "name": "record_type", "in": "query", "schema": { "type": "string" } },
+          { "name": "name.eq", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The records of the zone.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/DnsRecord" } }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createDnsRecord",
+        "x-fern-sdk-group-name": "dns-records",
+        "x-fern-sdk-method-name": "create-record",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DnsRecordInput" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "The created record.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DnsRecord" } } }
+          }
+        }
+      }
+    },
+    "/zones/{zone_id}/dns-records/{record_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ZoneId" },
+        { "name": "record_id", "in": "path", "required": true, "schema": { "type": "string" } }
+      ],
+      "get": {
+        "operationId": "getDnsRecord",
+        "x-fern-sdk-group-name": "dns-records",
+        "x-fern-sdk-method-name": "getByID",
+        "responses": {
+          "200": {
+            "description": "The record.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DnsRecord" } } }
+          }
+        }
+      }
+    },
+    "/values/primitives": {
+      "post": {
+        "operationId": "echoPrimitives",
+        "x-fern-sdk-group-name": "values",
+        "x-fern-sdk-method-name": "primitives",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Primitives" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The values that were sent.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Primitives" } } }
+          }
+        }
+      }
+    },
+    "/values/shapes": {
+      "post": {
+        "operationId": "echoShape",
+        "x-fern-sdk-group-name": "values",
+        "x-fern-sdk-method-name": "shape",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Shape" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The shape that was sent.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Shape" } } }
+          }
+        }
+      }
+    },
+    "/values/pets": {
+      "post": {
+        "operationId": "echoPet",
+        "x-fern-sdk-group-name": "values",
+        "x-fern-sdk-method-name": "pet",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The pet that was sent.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } }
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "listEvents",
+        "x-fern-sdk-group-name": "events",
+        "x-fern-sdk-method-name": "list",
+        "x-forge-pagination": {
+          "items": ".data",
+          "param": "offset",
+          "next": "($param // 0) + (.data | length)",
+          "more": "($param // 0) + (.data | length) < .total"
+        },
+        "parameters": [
+          { "name": "limit", "in": "query", "schema": { "type": "integer" } },
+          { "name": "offset", "in": "query", "schema": { "type": "integer" } },
+          { "name": "since", "in": "query", "schema": { "type": "string", "format": "date-time" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of events.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventPage" } } }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createEvent",
+        "x-fern-sdk-group-name": "events",
+        "x-fern-sdk-method-name": "create",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/EventInput" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "The created event.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Event" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": { "type": "http", "scheme": "bearer" }
+    },
+    "parameters": {
+      "OrgId": {
+        "name": "org_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" },
+        "x-fern-sdk-variable": "org_id"
+      },
+      "ProjectId": {
+        "name": "project_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      },
+      "ZoneId": {
+        "name": "zone_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string" }
+      }
+    },
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "type": "string" } }
+      },
+      "Project": {
+        "type": "object",
+        "required": ["id", "display_name", "created_at"],
+        "properties": {
+          "id": { "type": "string" },
+          "display_name": { "type": "string" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "archived": { "type": "boolean" },
+          "settings": { "$ref": "#/components/schemas/ProjectSettings" }
+        }
+      },
+      "ProjectInput": {
+        "type": "object",
+        "required": ["display_name"],
+        "properties": {
+          "display_name": { "type": "string" },
+          "settings": { "$ref": "#/components/schemas/ProjectSettings" }
+        }
+      },
+      "ProjectUpdate": {
+        "type": "object",
+        "properties": {
+          "display_name": { "type": "string" },
+          "settings": { "$ref": "#/components/schemas/ProjectSettings" }
+        }
+      },
+      "ProjectSettings": {
+        "type": "object",
+        "properties": {
+          "visibility": { "type": "string", "enum": ["private", "public"] },
+          "default_branch": { "type": "string" }
+        }
+      },
+      "ProjectPage": {
+        "type": "object",
+        "required": ["data", "next_cursor"],
+        "properties": {
+          "data": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } },
+          "next_cursor": { "type": "string", "nullable": true }
+        }
+      },
+      "Transfer": {
+        "type": "object",
+        "required": ["org_id"],
+        "properties": {
+          "org_id": { "type": "string", "description": "The organization that receives the project." },
+          "note": { "type": "string" }
+        }
+      },
+      "not_found": {
+        "type": "object",
+        "required": ["error_code", "message"],
+        "properties": {
+          "error_code": { "type": "string" },
+          "message": { "type": "string" }
+        }
+      },
+      "ErrorList": {
+        "type": "object",
+        "required": ["errors"],
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["code", "message"],
+              "properties": {
+                "code": { "type": "integer" },
+                "message": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "Member": {
+        "type": "object",
+        "required": ["user_id", "role"],
+        "properties": {
+          "user_id": { "type": "string" },
+          "role": { "$ref": "#/components/schemas/Role" }
+        }
+      },
+      "MemberInput": {
+        "type": "object",
+        "required": ["user_id", "role"],
+        "properties": {
+          "user_id": { "type": "string" },
+          "role": { "$ref": "#/components/schemas/Role" }
+        }
+      },
+      "Role": { "type": "string", "enum": ["admin", "viewer"] },
+      "Invitation": {
+        "type": "object",
+        "required": ["invitation_id", "status"],
+        "properties": {
+          "invitation_id": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending"] }
+        }
+      },
+      "MemberPage": {
+        "type": "object",
+        "required": ["data", "meta"],
+        "properties": {
+          "data": { "type": "array", "items": { "$ref": "#/components/schemas/Member" } },
+          "meta": {
+            "type": "object",
+            "required": ["page", "per_page", "total_pages"],
+            "properties": {
+              "page": { "type": "integer" },
+              "per_page": { "type": "integer" },
+              "total_pages": { "type": "integer" }
+            }
+          }
+        }
+      },
+      "DnsRecord": {
+        "type": "object",
+        "required": ["id", "record-name", "record_type"],
+        "properties": {
+          "id": { "type": "string" },
+          "record-name": { "type": "string" },
+          "record_type": { "type": "string" },
+          "ttlSeconds": { "type": "integer" },
+          "ipv4_cidr": { "type": "string" },
+          "XMLComment": { "type": "string" },
+          "@type": { "type": "string" }
+        }
+      },
+      "DnsRecordInput": {
+        "type": "object",
+        "required": ["record-name", "record_type"],
+        "properties": {
+          "record-name": { "type": "string" },
+          "record_type": { "type": "string" },
+          "ttlSeconds": { "type": "integer" },
+          "ipv4_cidr": { "type": "string" },
+          "XMLComment": { "type": "string" }
+        }
+      },
+      "Primitives": {
+        "type": "object",
+        "required": ["text", "count", "ratio", "enabled"],
+        "properties": {
+          "text": { "type": "string" },
+          "count": { "type": "integer" },
+          "ratio": { "type": "number" },
+          "enabled": { "type": "boolean" },
+          "status": { "$ref": "#/components/schemas/Status" },
+          "scores": { "type": "array", "items": { "type": "integer" } },
+          "labels": { "type": "object", "additionalProperties": { "type": "string" } },
+          "note": { "type": "string", "nullable": true },
+          "anything": {}
+        }
+      },
+      "Status": { "type": "string", "enum": ["active", "pending"] },
+      "Shape": {
+        "allOf": [{ "$ref": "#/components/schemas/ShapeBase" }, { "$ref": "#/components/schemas/Geometry" }]
+      },
+      "ShapeBase": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string" },
+          "label": { "type": "string", "nullable": true },
+          "fill": { "$ref": "#/components/schemas/Fill" }
+        }
+      },
+      "Geometry": {
+        "oneOf": [{ "$ref": "#/components/schemas/Circle" }, { "$ref": "#/components/schemas/Square" }],
+        "discriminator": { "propertyName": "kind" }
+      },
+      "Circle": {
+        "type": "object",
+        "required": ["kind", "radius"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["circle"] },
+          "radius": { "type": "number" }
+        }
+      },
+      "Square": {
+        "type": "object",
+        "required": ["kind", "side_length"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["square"] },
+          "side_length": { "type": "number" }
+        }
+      },
+      "Fill": {
+        "anyOf": [{ "$ref": "#/components/schemas/Color" }, { "$ref": "#/components/schemas/Gradient" }]
+      },
+      "Color": { "type": "string", "enum": ["red", "green", "blue"] },
+      "Gradient": {
+        "type": "object",
+        "required": ["from_color", "to_color"],
+        "properties": {
+          "from_color": { "$ref": "#/components/schemas/Color" },
+          "to_color": { "$ref": "#/components/schemas/Color" }
+        }
+      },
+      "Pet": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": { "type": "string" },
+          "owner": { "$ref": "#/components/schemas/User" },
+          "tags": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      },
+      "User": {
+        "type": "object",
+        "required": ["display_name"],
+        "properties": {
+          "display_name": { "type": "string" },
+          "favorite_pet": { "$ref": "#/components/schemas/Pet" }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "required": ["id", "starts_at", "day", "payload", "sequence"],
+        "properties": {
+          "id": { "type": "string" },
+          "starts_at": { "type": "string", "format": "date-time" },
+          "day": { "type": "string", "format": "date" },
+          "payload": { "type": "string", "format": "byte" },
+          "sequence": { "type": "integer", "format": "int64" }
+        }
+      },
+      "EventInput": {
+        "type": "object",
+        "required": ["starts_at", "day", "payload", "sequence"],
+        "properties": {
+          "starts_at": { "type": "string", "format": "date-time" },
+          "day": { "type": "string", "format": "date" },
+          "payload": { "type": "string", "format": "byte" },
+          "sequence": { "type": "integer", "format": "int64" }
+        }
+      },
+      "EventPage": {
+        "type": "object",
+        "required": ["data", "total"],
+        "properties": {
+          "data": { "type": "array", "items": { "$ref": "#/components/schemas/Event" } },
+          "total": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+# The cases the TypeScript generator does not pass yet, each with why. A
+# case listed here that passes fails the run, so take it out when the
+# generator catches up.
+
+a root method is called on the root client: the generator puts no methods on the root client
+an object body is sent in wire names: the generator does not fill SDK variables from the client options
+an SDK variable is taken from the client options: the generator does not fill SDK variables from the client options
+a cursor is followed until it is null: the generator does not paginate
+iteration stops when the next cursor is the one just sent: the generator does not paginate
+page numbers are followed up to the total: the generator does not paginate
+offsets are followed up to the total: the generator does not paginate
+every page is fetched with the options of the call: the generator does not paginate

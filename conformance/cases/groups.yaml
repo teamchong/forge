@@ -1,0 +1,56 @@
+# Groups: methods on the root client, in a group, in a nested group, and in a
+# subgroup that has the name of a method.
+
+- name: a root method is called on the root client
+  call:
+    method: health
+  exchanges:
+    - expect: { method: GET, path: /health }
+      respond:
+        status: 200
+        body: { status: ok }
+  result:
+    response: { status: ok }
+
+- name: a method in a group is called through the group
+  call:
+    group: projects
+    method: archive
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect: { method: POST, path: /orgs/o1/projects/p1/archive }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z', archived: true }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' }, archived: true }
+
+- name: a subgroup with the name of a method is called through it
+  call:
+    group: projects.archive
+    method: restore
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect: { method: POST, path: /orgs/o1/projects/p1/archive/restore }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z', archived: false }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' }, archived: false }
+
+- name: a method in a nested group is called through both groups
+  call:
+    group: projects.members
+    method: list
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o1/projects/p1/members }
+      respond:
+        status: 200
+        body:
+          data: [{ user_id: u1, role: admin }]
+          meta: { page: 1, per_page: 20, total_pages: 1 }
+  result:
+    response:
+      data: [{ userId: u1, role: admin }]
+      meta: { page: 1, perPage: 20, totalPages: 1 }

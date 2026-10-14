@@ -1,0 +1,39 @@
+# SDK variables: a path parameter with x-fern-sdk-variable, set in the client
+# options, in the request, or in neither.
+
+- name: an SDK variable is taken from the client options
+  client: { orgId: o1 }
+  call:
+    group: projects
+    method: get
+    request: { projectId: p1 }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o1/projects/p1 }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: the request's value of an SDK variable wins over the client's
+  client: { orgId: o1 }
+  call:
+    group: projects
+    method: get
+    request: { orgId: o2, projectId: p1 }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o2/projects/p1 }
+      respond:
+        status: 200
+        body: { id: p1, display_name: Demo, created_at: '2024-03-01T10:00:00Z' }
+  result:
+    response: { id: p1, displayName: Demo, createdAt: { $datetime: '2024-03-01T10:00:00Z' } }
+
+- name: a call without an SDK variable is refused before a request
+  call:
+    group: projects
+    method: get
+    request: { projectId: p1 }
+  result:
+    error:
+      kind: client

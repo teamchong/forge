@@ -1,0 +1,78 @@
+# Formats: date-time, date, byte and int64 values, which JSON has no type
+# for. The client side writes them as tagged values.
+
+- name: formatted values are sent in their wire form
+  call:
+    group: events
+    method: create
+    request:
+      startsAt: { $datetime: '2024-03-01T10:00:00Z' }
+      day: { $date: '2024-03-01' }
+      payload: { $bytes: aGVsbG8= }
+      sequence: { $int64: '9007199254740993' }
+  exchanges:
+    - expect:
+        method: POST
+        path: /events
+        body:
+          starts_at: '2024-03-01T10:00:00Z'
+          day: '2024-03-01'
+          payload: aGVsbG8=
+          sequence: 9007199254740993
+      respond:
+        status: 201
+        body:
+          id: e1
+          starts_at: '2024-03-01T10:00:00Z'
+          day: '2024-03-01'
+          payload: aGVsbG8=
+          sequence: 9007199254740993
+  result:
+    response:
+      id: e1
+      startsAt: { $datetime: '2024-03-01T10:00:00Z' }
+      day: { $date: '2024-03-01' }
+      payload: { $bytes: aGVsbG8= }
+      sequence: { $int64: '9007199254740993' }
+
+- name: a date-time with an offset is received as the same instant
+  call:
+    group: events
+    method: create
+    request:
+      startsAt: { $datetime: '2024-03-01T10:00:00Z' }
+      day: { $date: '2024-03-01' }
+      payload: { $bytes: '' }
+      sequence: { $int64: '-1' }
+  exchanges:
+    - expect:
+        method: POST
+        path: /events
+        body: { starts_at: '2024-03-01T10:00:00Z', day: '2024-03-01', payload: '', sequence: -1 }
+      respond:
+        status: 201
+        body: { id: e2, starts_at: '2024-03-01T12:00:00.5+02:00', day: '2024-12-31', payload: '', sequence: -1 }
+  result:
+    response:
+      id: e2
+      startsAt: { $datetime: '2024-03-01T10:00:00.5Z' }
+      day: { $date: '2024-12-31' }
+      payload: { $bytes: '' }
+      sequence: { $int64: '-1' }
+
+- name: a date-time query parameter is sent in its wire form
+  call:
+    group: events
+    method: list
+    request:
+      since: { $datetime: '2024-03-01T10:00:00Z' }
+  exchanges:
+    - expect:
+        method: GET
+        path: /events
+        query: { since: '2024-03-01T10:00:00Z' }
+      respond:
+        status: 200
+        body: { data: [], total: 0 }
+  result:
+    response: { data: [], total: 0 }

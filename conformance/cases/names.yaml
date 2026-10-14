@@ -1,0 +1,107 @@
+# Names: kebab, snake and camel names, acronyms, and names with characters
+# other than letters, digits, - and _.
+
+- name: a kebab-case group and a snake_case method are camelCase
+  call:
+    group: dnsRecords
+    method: listAll
+    request: { zoneId: z1 }
+  exchanges:
+    - expect: { method: GET, path: /zones/z1/dns-records }
+      respond:
+        status: 200
+        body:
+          - { id: r1, record-name: www, record_type: A, ttlSeconds: 300, ipv4_cidr: 192.0.2.0/24 }
+  result:
+    response:
+      - { id: r1, recordName: www, recordType: A, ttlSeconds: 300, ipv4Cidr: 192.0.2.0/24 }
+
+- name: a kebab-case method is camelCase and its body is sent in wire names
+  call:
+    group: dnsRecords
+    method: createRecord
+    request: { zoneId: z1, recordName: www, recordType: A, ttlSeconds: 300, ipv4Cidr: 192.0.2.0/24 }
+  exchanges:
+    - expect:
+        method: POST
+        path: /zones/z1/dns-records
+        headers: { content-type: application/json }
+        body: { record-name: www, record_type: A, ttlSeconds: 300, ipv4_cidr: 192.0.2.0/24 }
+      respond:
+        status: 201
+        body: { id: r1, record-name: www, record_type: A, ttlSeconds: 300, ipv4_cidr: 192.0.2.0/24 }
+  result:
+    response: { id: r1, recordName: www, recordType: A, ttlSeconds: 300, ipv4Cidr: 192.0.2.0/24 }
+
+- name: acronyms are words in camelCase
+  call:
+    group: dnsRecords
+    method: getById
+    request: { zoneId: z1, recordId: r1 }
+  exchanges:
+    - expect: { method: GET, path: /zones/z1/dns-records/r1 }
+      respond:
+        status: 200
+        body: { id: r1, record-name: www, record_type: TXT, XMLComment: '<note/>' }
+  result:
+    response: { id: r1, recordName: www, recordType: TXT, xmlComment: '<note/>' }
+
+- name: a snake_case query parameter is sent in its wire name
+  call:
+    group: dnsRecords
+    method: listAll
+    request: { zoneId: z1, recordType: AAAA }
+  exchanges:
+    - expect:
+        method: GET
+        path: /zones/z1/dns-records
+        query: { record_type: AAAA }
+      respond:
+        status: 200
+        body: []
+  result:
+    response: []
+
+- name: a query parameter with other characters is sent through the query option
+  call:
+    group: dnsRecords
+    method: listAll
+    request: { zoneId: z1 }
+    options:
+      query: { name.eq: www }
+  exchanges:
+    - expect:
+        method: GET
+        path: /zones/z1/dns-records
+        query: { name.eq: www }
+      respond:
+        status: 200
+        body: []
+  result:
+    response: []
+
+- name: a property with other characters is kept as the server sent it
+  call:
+    group: dnsRecords
+    method: getById
+    request: { zoneId: z1, recordId: r1 }
+  exchanges:
+    - expect: { method: GET, path: /zones/z1/dns-records/r1 }
+      respond:
+        status: 200
+        body: { id: r1, record-name: www, record_type: A, '@type': dns.record }
+  result:
+    response: { id: r1, recordName: www, recordType: A, '@type': dns.record }
+
+- name: a property the description does not know is kept as the server sent it
+  call:
+    group: dnsRecords
+    method: getById
+    request: { zoneId: z1, recordId: r1 }
+  exchanges:
+    - expect: { method: GET, path: /zones/z1/dns-records/r1 }
+      respond:
+        status: 200
+        body: { id: r1, record-name: www, record_type: A, added_later: { some_key: 1 } }
+  result:
+    response: { id: r1, recordName: www, recordType: A, added_later: { some_key: 1 } }

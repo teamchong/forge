@@ -1,0 +1,181 @@
+# Schemas: every primitive, enums, arrays, maps, nullable, allOf, oneOf,
+# anyOf, and models that refer to each other.
+
+- name: every primitive is sent and received
+  call:
+    group: values
+    method: primitives
+    request:
+      text: hi
+      count: 3
+      ratio: 0.5
+      enabled: true
+      status: active
+      scores: [1, 2, 3]
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/primitives
+        body: { text: hi, count: 3, ratio: 0.5, enabled: true, status: active, scores: [1, 2, 3] }
+      respond:
+        status: 200
+        body: { text: hi, count: 3, ratio: 0.5, enabled: false, status: pending, scores: [] }
+  result:
+    response: { text: hi, count: 3, ratio: 0.5, enabled: false, status: pending, scores: [] }
+
+- name: the keys of a map are kept
+  call:
+    group: values
+    method: primitives
+    request:
+      text: hi
+      count: 0
+      ratio: 1
+      enabled: true
+      labels: { team_name: core, Env-Tier: prod }
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/primitives
+        body: { text: hi, count: 0, ratio: 1, enabled: true, labels: { team_name: core, Env-Tier: prod } }
+      respond:
+        status: 200
+        body: { text: hi, count: 0, ratio: 1, enabled: true, labels: { team_name: core, Env-Tier: prod } }
+  result:
+    response: { text: hi, count: 0, ratio: 1, enabled: true, labels: { team_name: core, Env-Tier: prod } }
+
+- name: a nullable property is received as null
+  call:
+    group: values
+    method: primitives
+    request: { text: hi, count: 1, ratio: 1, enabled: true }
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/primitives
+        body: { text: hi, count: 1, ratio: 1, enabled: true }
+      respond:
+        status: 200
+        body: { text: hi, count: 1, ratio: 1, enabled: true, note: null }
+  result:
+    response: { text: hi, count: 1, ratio: 1, enabled: true, note: null }
+
+- name: a value of any type is kept as it is
+  call:
+    group: values
+    method: primitives
+    request:
+      text: hi
+      count: 1
+      ratio: 1
+      enabled: true
+      anything: { some_key: [1, 'two', { nested_key: null }] }
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/primitives
+        body:
+          text: hi
+          count: 1
+          ratio: 1
+          enabled: true
+          anything: { some_key: [1, 'two', { nested_key: null }] }
+      respond:
+        status: 200
+        body:
+          text: hi
+          count: 1
+          ratio: 1
+          enabled: true
+          anything: { some_key: [1, 'two', { nested_key: null }] }
+  result:
+    response:
+      text: hi
+      count: 1
+      ratio: 1
+      enabled: true
+      anything: { some_key: [1, 'two', { nested_key: null }] }
+
+- name: an allOf of an object and a oneOf is sent and received
+  call:
+    group: values
+    method: shape
+    request: { id: s1, label: Wheel, kind: circle, radius: 2.5 }
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/shapes
+        body: { id: s1, label: Wheel, kind: circle, radius: 2.5 }
+      respond:
+        status: 200
+        body: { id: s1, label: null, kind: circle, radius: 2.5 }
+  result:
+    response: { id: s1, label: null, kind: circle, radius: 2.5 }
+
+- name: the other member of a oneOf is converted with its own names
+  call:
+    group: values
+    method: shape
+    request: { id: s2, kind: square, sideLength: 4 }
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/shapes
+        body: { id: s2, kind: square, side_length: 4 }
+      respond:
+        status: 200
+        body: { id: s2, kind: square, side_length: 4 }
+  result:
+    response: { id: s2, kind: square, sideLength: 4 }
+
+- name: an anyOf of an enum and an object is sent and received
+  call:
+    group: values
+    method: shape
+    request:
+      id: s3
+      kind: circle
+      radius: 1
+      fill: { fromColor: red, toColor: blue }
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/shapes
+        body: { id: s3, kind: circle, radius: 1, fill: { from_color: red, to_color: blue } }
+      respond:
+        status: 200
+        body: { id: s3, kind: circle, radius: 1, fill: green }
+  result:
+    response: { id: s3, kind: circle, radius: 1, fill: green }
+
+- name: models that refer to each other are converted at every level
+  call:
+    group: values
+    method: pet
+    request:
+      name: Rex
+      owner:
+        displayName: Ann
+        favoritePet: { name: Rex, owner: { displayName: Ann } }
+  exchanges:
+    - expect:
+        method: POST
+        path: /values/pets
+        body:
+          name: Rex
+          owner:
+            display_name: Ann
+            favorite_pet: { name: Rex, owner: { display_name: Ann } }
+      respond:
+        status: 200
+        body:
+          name: Rex
+          owner:
+            display_name: Ann
+            favorite_pet: { name: Rex, tags: { good_boy: 'yes' } }
+  result:
+    response:
+      name: Rex
+      owner:
+        displayName: Ann
+        favoritePet: { name: Rex, tags: { good_boy: 'yes' } }

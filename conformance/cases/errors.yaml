@@ -1,0 +1,73 @@
+# Errors: a declared error for one status, one for a range, an undeclared
+# status, and a request that gets no response.
+
+- name: a declared error is decoded
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: missing }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o1/projects/missing }
+      respond:
+        status: 404
+        body: { error_code: not_found, message: No such project }
+  result:
+    error:
+      kind: api
+      status: 404
+      message: No such project
+      details: { errorCode: not_found, message: No such project }
+
+- name: an error declared for a range is decoded
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o1/projects/p1 }
+      respond:
+        status: 409
+        body:
+          errors:
+            - { code: 1001, message: Name taken }
+            - { code: 1002, message: Try another }
+  result:
+    error:
+      kind: api
+      status: 409
+      message: Name taken; Try another
+      details:
+        errors:
+          - { code: 1001, message: Name taken }
+          - { code: 1002, message: Try another }
+
+- name: an undeclared status keeps its body as text
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o1/projects/p1 }
+      respond:
+        status: 503
+        headers: { content-type: text/plain }
+        text: upstream unavailable
+  result:
+    error:
+      kind: api
+      status: 503
+      message: 503 Service Unavailable
+      details: upstream unavailable
+
+- name: a request that gets no response is a network error
+  call:
+    group: projects
+    method: get
+    request: { orgId: o1, projectId: p1 }
+  exchanges:
+    - expect: { method: GET, path: /orgs/o1/projects/p1 }
+      respond:
+        disconnect: true
+  result:
+    error:
+      kind: network
