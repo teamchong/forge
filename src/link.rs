@@ -138,6 +138,8 @@ fn build(mut doc: Doc) -> Result<Forge, Vec<String>> {
         values,
         extensions,
         defaults,
+        #[cfg(feature = "wasm")]
+        id: crate::wasm::next_id(),
     };
     forge.top_models = place_models(&mut forge);
     Ok(forge)

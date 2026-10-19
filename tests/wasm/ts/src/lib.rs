@@ -13,10 +13,8 @@
 
 extern crate self as forge;
 
+use std::sync::{Arc, Mutex, OnceLock};
 use std::{fmt, iter};
-
-use elsa::FrozenMap;
-
 mod json;
 mod name;
 
@@ -128,37 +126,56 @@ pub struct Forge {
     pub description: String,
     pub base_url: String,
 
-    groups: Vec<u32>,
-    top_models: Vec<u32>,
+    groups: OnceLock<Vec<u32>>,
+    top_models: OnceLock<Vec<u32>>,
 
-    group_data: FrozenMap<u32, Box<GroupData>>,
-    method_data: FrozenMap<u32, Box<MethodData>>,
-    model_data: FrozenMap<u32, Box<ModelData>>,
-    type_data: FrozenMap<u32, Box<TypeData>>,
+    group_data: Vec<OnceLock<GroupData>>,
+    method_data: Vec<OnceLock<MethodData>>,
+    model_data: Vec<OnceLock<ModelData>>,
+    type_data: Vec<OnceLock<TypeData>>,
+}
+
+static CACHED_FORGE: Mutex<Option<(u64, Arc<Forge>)>> = Mutex::new(None);
+
+fn slots<T>(n: u32) -> Vec<OnceLock<T>> {
+    (0..n).map(|_| OnceLock::new()).collect()
 }
 
 impl Forge {
-    fn fetch() -> Forge {
+    fn fetch() -> Arc<Forge> {
+        let id = host::id();
+        let mut guard = CACHED_FORGE.lock().unwrap_or_else(|err| err.into_inner());
+        if let Some((cached_id, forge)) = guard.as_ref()
+            && *cached_id == id
+        {
+            return Arc::clone(forge);
+        }
         let info = host::info();
-        Forge {
+        let counts = host::counts();
+        let forge = Arc::new(Forge {
             version: info.version,
             description: info.description,
             base_url: info.base_url,
-            groups: host::groups(),
-            top_models: host::models(),
-            group_data: FrozenMap::new(),
-            method_data: FrozenMap::new(),
-            model_data: FrozenMap::new(),
-            type_data: FrozenMap::new(),
-        }
+            groups: OnceLock::new(),
+            top_models: OnceLock::new(),
+            group_data: slots(counts.groups),
+            method_data: slots(counts.methods),
+            model_data: slots(counts.models),
+            type_data: slots(counts.types),
+        });
+        *guard = Some((id, Arc::clone(&forge)));
+        forge
     }
 
     pub fn groups(&self) -> impl Iterator<Item = Group<'_>> {
-        self.groups.iter().map(|&id| self.group(id))
+        self.groups.get_or_init(host::groups).iter().map(|&id| self.group(id))
     }
 
     pub fn models(&self) -> impl ExactSizeIterator<Item = Model<'_>> {
-        self.top_models.iter().map(|&id| self.model(id))
+        self.top_models
+            .get_or_init(host::models)
+            .iter()
+            .map(|&id| self.model(id))
     }
 
     fn group(&self, id: u32) -> Group<'_> {
@@ -183,31 +200,23 @@ impl Forge {
     }
 
     fn group_data(&self, id: u32) -> &GroupData {
-        if let Some(data) = self.group_data.get(&id) {
-            return data;
-        }
-        let g = host::get_group(id);
-        self.group_data.insert(
-            id,
-            Box::new(GroupData {
+        self.group_data[id as usize].get_or_init(|| {
+            let g = host::get_group(id);
+            GroupData {
                 name: Name::from_words(g.name),
                 description: g.description,
                 path: g.path,
                 children: g.children,
                 methods: g.methods,
                 models: g.models,
-            }),
-        )
+            }
+        })
     }
 
     fn method_data(&self, id: u32) -> &MethodData {
-        if let Some(data) = self.method_data.get(&id) {
-            return data;
-        }
-        let m = host::get_method(id);
-        self.method_data.insert(
-            id,
-            Box::new(MethodData {
+        self.method_data[id as usize].get_or_init(|| {
+            let m = host::get_method(id);
+            MethodData {
                 name: Name::from_words(m.name),
                 group: m.group,
                 http_method: match m.http_method {
@@ -237,6 +246,15 @@ impl Forge {
                 hidden: m.hidden,
                 confirmation: m.confirmation,
                 request: m.request,
+                params: m.params,
+                locations: m
+                    .locations
+                    .into_iter()
+                    .map(|location| match location {
+                        host::Location::Path => Location::Path,
+                        host::Location::Query(exploded) => Location::Query { exploded },
+                    })
+                    .collect(),
                 headers: m.headers,
                 body: m.body.map(|b| BodyData {
                     required: b.required,
@@ -251,33 +269,25 @@ impl Forge {
                     .into_iter()
                     .map(|(name, value)| (name, Json::parse(&value)))
                     .collect(),
-            }),
-        )
+            }
+        })
     }
 
     fn model_data(&self, id: u32) -> &ModelData {
-        if let Some(data) = self.model_data.get(&id) {
-            return data;
-        }
-        let m = host::get_model(id);
-        self.model_data.insert(
-            id,
-            Box::new(ModelData {
+        self.model_data[id as usize].get_or_init(|| {
+            let m = host::get_model(id);
+            ModelData {
                 schema_name: m.schema_name,
                 name: Name::from_words(m.name),
                 group: m.group,
                 description: m.description,
                 deprecated: m.deprecated,
                 ty: m.ty,
-            }),
-        )
+            }
+        })
     }
-
     fn type_data(&self, id: u32) -> &TypeData {
-        if let Some(data) = self.type_data.get(&id) {
-            return data;
-        }
-        let data = match host::get_type(id) {
+        self.type_data[id as usize].get_or_init(|| match host::get_type(id) {
             host::TypeInfo::Scalar(scalar) => TypeData::Scalar(match scalar {
                 host::Scalar::Unknown => Scalar::Unknown,
                 host::Scalar::Null => Scalar::Null,
@@ -347,8 +357,7 @@ impl Forge {
             }),
             host::TypeInfo::Intersection(members) => TypeData::Intersection(members),
             host::TypeInfo::Model(id) => TypeData::Model(id),
-        };
-        self.type_data.insert(id, Box::new(data))
+        })
     }
 }
 
@@ -393,6 +402,8 @@ struct MethodData {
     hidden: bool,
     confirmation: Option<String>,
     request: Option<u32>,
+    params: Option<u32>,
+    locations: Vec<Location>,
     headers: Option<u32>,
     body: Option<BodyData>,
     responses: Vec<ResponseData>,
@@ -622,10 +633,10 @@ impl<'f> Method<'f> {
     }
 
     pub fn location(self, field: Field<'f>) -> Option<Location> {
-        host::get_location(self.id, field.object, field.index).map(|location| match location {
-            host::Location::Path => Location::Path,
-            host::Location::Query(exploded) => Location::Query { exploded },
-        })
+        if !std::ptr::eq(self.forge, field.forge) || self.data().params != Some(field.object) {
+            return None;
+        }
+        self.data().locations.get(field.index as usize).copied()
     }
 
     pub fn body(self) -> Option<Body<'f>> {

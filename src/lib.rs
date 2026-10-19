@@ -72,6 +72,8 @@ pub struct Forge {
     /// The `default` of every schema in the document that has one, used
     /// by a field or not, indexed by the `Id` a field keeps.
     defaults: Vec<Json>,
+    #[cfg(feature = "wasm")]
+    id: u64,
 }
 
 impl Forge {

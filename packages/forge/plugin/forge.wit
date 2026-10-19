@@ -103,6 +103,10 @@ interface forge {
         /// confirmation.
         confirmation: option<string>,
         request: option<type-id>,
+        /// The object of parameters in `request`, and where each of its
+        /// fields is sent. A trailing `body` field has no location.
+        params: option<type-id>,
+        locations: list<location>,
         /// The header parameters: an object type, with a field for each.
         /// Its fields have no location.
         headers: option<type-id>,
@@ -189,6 +193,7 @@ interface forge {
         model(model-id),
     }
 
+    id: func() -> u64;
     info: func() -> forge-info;
     counts: func() -> forge-counts;
     /// Every group, depth first.

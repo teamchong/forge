@@ -384,10 +384,10 @@ export interface ModelType {
 export function definePlugin(plugin: Plugin): Exports {
   const exports = {
     generate() {
-      return call(() => files(plugin.generate?.(new ForgeImpl()) ?? []));
+      return call(() => files(plugin.generate?.(currentForge()) ?? []));
     },
     generateGroup(id: host.GroupId) {
-      return call(() => files(plugin.generateGroup?.(new ForgeImpl().group(id)) ?? []));
+      return call(() => files(plugin.generateGroup?.(currentForge().group(id)) ?? []));
     },
   } satisfies Pick<typeof hostPlugin, 'generate' | 'generateGroup'>;
   return exports;
@@ -497,12 +497,12 @@ function lazy<T>(f: () => T): () => T {
   };
 }
 
-/** Returns what `cache` has under `id`, making it with `make` if it has nothing. */
-function cached<T>(cache: Map<number, T>, id: number, make: () => T): T {
-  let value = cache.get(id);
+/** Returns what `cache` has at index `id`, making it with `make` if it has nothing. */
+function cached<T>(cache: (T | undefined)[], id: number, make: () => T): T {
+  let value = cache[id];
   if (value === undefined) {
     value = make();
-    cache.set(id, value);
+    cache[id] = value;
   }
   return value;
 }
@@ -553,24 +553,41 @@ function upperFirst(word: string): string {
   return ch.toUpperCase() + word.slice(ch.length);
 }
 
+let cachedForge: { id: bigint; forge: ForgeImpl } | undefined;
+
+function currentForge(): ForgeImpl {
+  if (typeof host.id === 'function') {
+    const id = host.id();
+    if (cachedForge?.id === id) {
+      return cachedForge.forge;
+    }
+    const forge = new ForgeImpl();
+    cachedForge = { id, forge };
+    return forge;
+  }
+  return new ForgeImpl();
+}
+
 class ForgeImpl implements Forge {
-  readonly version: string;
-  readonly description: string;
-  readonly baseUrl: string;
-  private readonly groupCache = new Map<host.GroupId, GroupImpl>();
-  private readonly methodCache = new Map<host.MethodId, MethodImpl>();
-  private readonly modelCache = new Map<host.ModelId, ModelImpl>();
-  private readonly typeCache = new Map<host.TypeId, Type>();
+  private readonly info = lazy(() => host.info());
+  private readonly groupCache: (GroupImpl | undefined)[] = [];
+  private readonly methodCache: (MethodImpl | undefined)[] = [];
+  private readonly modelCache: (ModelImpl | undefined)[] = [];
+  private readonly typeCache: (Type | undefined)[] = [];
   private readonly allGroups = lazy(() => ids(host.groups()).map((id) => this.group(id)));
   private readonly topModels = lazy(() => ids(host.models()).map((id) => this.model(id)));
 
-  constructor() {
-    const info = host.info();
-    this.version = info.version;
-    this.description = info.description;
-    this.baseUrl = info.baseUrl;
+  get version(): string {
+    return this.info().version;
   }
 
+  get description(): string {
+    return this.info().description;
+  }
+
+  get baseUrl(): string {
+    return this.info().baseUrl;
+  }
   get groups(): readonly Group[] {
     return this.allGroups();
   }
@@ -691,13 +708,14 @@ class MethodImpl implements Method {
     hidden: boolean;
     confirmation: string | undefined;
     request: host.TypeId | undefined;
+    params: host.TypeId | undefined;
+    locations: Location[];
     headers: host.TypeId | undefined;
     body: Body | undefined;
     responses: Response[];
     errors: Response[];
     extensions: (readonly [string, Json])[];
   };
-
   constructor(
     private readonly forge: ForgeImpl,
     private readonly id: host.MethodId,
@@ -717,6 +735,8 @@ class MethodImpl implements Method {
         hidden: m.hidden,
         confirmation: opt(m.confirmation),
         request: opt(m.request),
+        params: opt(m.params),
+        locations: (m.locations ?? []).map(toLocation),
         headers: opt(m.headers),
         body: body && {
           required: body.required,
@@ -808,18 +828,24 @@ class MethodImpl implements Method {
     if (!(field instanceof FieldImpl) || field.forge !== this.forge) {
       return undefined;
     }
-    const location = opt(host.getLocation(this.id, field.object, field.index));
-    switch (location?.tag) {
-      case undefined:
-        return undefined;
-      case 'path':
-        return { in: 'path' };
-      case 'query':
-        return { in: 'query', exploded: location.val };
-      default: {
-        const unknown: never = location;
-        throw new Error(`a location this library doesn't know: ${JSON.stringify(unknown)}`);
-      }
+    const info = this.info();
+    if (info.params !== undefined) {
+      return field.object === info.params ? info.locations[field.index] : undefined;
+    }
+    const location = opt(host.getLocation?.(this.id, field.object, field.index));
+    return location === undefined ? undefined : toLocation(location);
+  }
+}
+
+function toLocation(location: host.Location): Location {
+  switch (location.tag) {
+    case 'path':
+      return { in: 'path' };
+    case 'query':
+      return { in: 'query', exploded: location.val };
+    default: {
+      const unknown: never = location;
+      throw new Error(`a location this library doesn't know: ${JSON.stringify(unknown)}`);
     }
   }
 }
