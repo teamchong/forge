@@ -29,6 +29,7 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::ptr;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -164,6 +165,10 @@ interface forge {
         /// confirmation.
         confirmation: option<string>,
         request: option<type-id>,
+        /// The object of parameters in `request`, and where each of its
+        /// fields is sent. A trailing `body` field has no location.
+        params: option<type-id>,
+        locations: list<location>,
         /// The header parameters: an object type, with a field for each.
         /// Its fields have no location.
         headers: option<type-id>,
@@ -250,6 +255,7 @@ interface forge {
         model(model-id),
     }
 
+    id: func() -> u64;
     info: func() -> forge-info;
     counts: func() -> forge-counts;
     /// Every group, depth first.
@@ -299,6 +305,7 @@ pub struct WasmPlugin {
     engine: Engine,
     pre: bindings::PluginPre<State>,
     pool: Mutex<Vec<Instance>>,
+    run: Mutex<(usize, u64)>,
 }
 
 /// A file a [`WasmPlugin`] generated, with its content already rendered.
@@ -332,6 +339,7 @@ impl WasmPlugin {
             engine,
             pre,
             pool: Mutex::new(Vec::new()),
+            run: Mutex::new((0, 0)),
         })
     }
 
@@ -348,6 +356,14 @@ impl WasmPlugin {
         };
 
         instance.store.data_mut().forge = forge;
+        instance.store.data_mut().id = {
+            let ptr = ptr::from_ref(forge).addr();
+            let mut run = self.run.lock().unwrap_or_else(|err| err.into_inner());
+            if run.0 != ptr {
+                *run = (ptr, next_id());
+            }
+            run.1
+        };
         let result = f(&instance.plugin, &mut instance.store);
         instance.store.data_mut().forge = ptr::null();
 
@@ -365,6 +381,7 @@ impl WasmPlugin {
     fn instantiate(&self) -> Result<Instance, Err> {
         let state = State {
             forge: ptr::null(),
+            id: 0,
             wasi: WasiCtx::builder().inherit_stderr().build(),
             table: ResourceTable::new(),
         };
@@ -378,6 +395,7 @@ impl Plugin for WasmPlugin {
     type File = WasmFile;
 
     fn generate(&self, forge: &Forge) -> Result<impl Iterator<Item = WasmFile>, Err> {
+        *self.run.lock().unwrap_or_else(|err| err.into_inner()) = (ptr::from_ref(forge).addr(), next_id());
         self.call(forge, |plugin, store| plugin.call_generate(store))
     }
 
@@ -409,6 +427,7 @@ struct State {
     /// The forge of the call running in the instance, or null between
     /// calls.
     forge: *const Forge,
+    id: u64,
     wasi: WasiCtx,
     table: ResourceTable,
 }
@@ -437,6 +456,10 @@ impl State {
 }
 
 impl wit::Host for State {
+    fn id(&mut self) -> wasmtime::Result<u64> {
+        Ok(self.id)
+    }
+
     fn info(&mut self) -> wasmtime::Result<wit::ForgeInfo> {
         let forge = self.forge()?;
         Ok(wit::ForgeInfo {
@@ -511,6 +534,15 @@ impl wit::Host for State {
             hidden: data.hidden,
             confirmation: data.confirmation.map(s),
             request: data.request.map(|id| id.0),
+            params: data.params.map(|id| id.0),
+            locations: data
+                .locations
+                .iter()
+                .map(|location| match *location {
+                    Location::Path => wit::Location::Path,
+                    Location::Query { exploded } => wit::Location::Query(exploded),
+                })
+                .collect(),
             headers: data.headers.map(|id| id.0),
             body: data.body.as_ref().map(|body| wit::BodyInfo {
                 required: body.required,
@@ -645,6 +677,11 @@ impl wit::Host for State {
             Location::Query { exploded } => wit::Location::Query(exploded),
         }))
     }
+}
+
+pub(crate) fn next_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Returns item `id` of `items`, or an error naming it as a `what`.
