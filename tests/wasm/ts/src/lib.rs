@@ -7,7 +7,7 @@
 //! host's `forge` interface (see `forge::wasm::WIT`).
 //!
 //! The forge stays in the host. A part is fetched the first time the
-//! plugin reads it in a call, and kept until the call ends.
+//! plugin reads it for a forge, and kept in the instance across group calls.
 
 #![allow(dead_code)]
 
