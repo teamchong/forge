@@ -497,6 +497,97 @@ function findSuggestions(schema: ApiSchema, query: string, limit = 5): string[] 
     .map((item) => item.candidate);
 }
 
+function tokenizeText(text: string): Set<string> {
+  const words = new Set<string>();
+  const lower = text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  for (const part of lower.split(/[^a-z0-9]+/)) {
+    if (part.length >= 2) {
+      words.add(part);
+    }
+  }
+  return words;
+}
+
+function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefined {
+  const queryTokens = Array.from(tokenizeText(rawQuery));
+  if (queryTokens.length === 0) {
+    return undefined;
+  }
+  const scoredMethods: { method: MethodSchema; score: number; matchedCount: number }[] = [];
+  for (const group of Object.values(schema.groups)) {
+    const groupWords = tokenizeText(`${group.path} ${group.description ?? ''}`);
+    for (const method of group.methods) {
+      const pathRouteWords = tokenizeText(`${method.path} ${method.route}`);
+      const summaryWords = tokenizeText(method.summary ?? '');
+      const descWords = tokenizeText(method.description ?? '');
+      let score = 0;
+      let matchedCount = 0;
+      for (const qt of queryTokens) {
+        let tokenScore = 0;
+        if (pathRouteWords.has(qt)) {
+          tokenScore += 5;
+        } else if (Array.from(pathRouteWords).some((w) => w.includes(qt))) {
+          tokenScore += 3;
+        }
+        if (summaryWords.has(qt)) {
+          tokenScore += 4;
+        } else if (Array.from(summaryWords).some((w) => w.includes(qt))) {
+          tokenScore += 2;
+        }
+        if (groupWords.has(qt)) {
+          tokenScore += 2;
+        }
+        if (descWords.has(qt)) {
+          tokenScore += 1;
+        }
+        if (tokenScore > 0) {
+          matchedCount++;
+          score += tokenScore;
+        }
+      }
+      if (
+        matchedCount > 0 &&
+        (matchedCount === queryTokens.length || (queryTokens.length >= 2 && matchedCount >= queryTokens.length - 1))
+      ) {
+        const depthPenalty = method.path.split('.').length * 0.2;
+        scoredMethods.push({ method, score: score + matchedCount * 10 - depthPenalty, matchedCount });
+      }
+    }
+  }
+  if (scoredMethods.length === 0) {
+    return undefined;
+  }
+  scoredMethods.sort((a, b) => b.score - a.score || a.method.path.localeCompare(b.method.path));
+  const fullMatches = scoredMethods.filter((m) => m.matchedCount === queryTokens.length);
+  const topPool = fullMatches.length > 0 ? fullMatches : scoredMethods;
+  if (topPool.length === 1 && topPool[0]) {
+    return `// Search match for '${rawQuery}': client.${topPool[0].method.path}\n${types(schema, topPool[0].method.path)}`;
+  }
+  const top = topPool.slice(0, 12);
+  const lines: string[] = [
+    `// Search matches for '${rawQuery}' (${topPool.length} matching methods; call types("<methodPath>") for full request/response types):`,
+  ];
+  const byGroup = new Map<string, MethodSchema[]>();
+  for (const { method } of top) {
+    const dot = method.path.lastIndexOf('.');
+    const gPath = dot !== -1 ? method.path.slice(0, dot) : '';
+    const list = byGroup.get(gPath) ?? [];
+    list.push(method);
+    byGroup.set(gPath, list);
+  }
+  for (const [gPath, methods] of byGroup.entries()) {
+    lines.push(`\n// Group: client.${gPath}`);
+    lines.push(`export namespace ${gPath} {`);
+    lines.push('  export interface Client {');
+    for (const m of methods) {
+      lines.push(renderMethodSignature(m, '    ', true));
+    }
+    lines.push('  }');
+    lines.push('}');
+  }
+  return lines.join('\n');
+}
+
 /**
  * Returns a progressive 1-level `.d.ts` TypeScript & JSDoc definition for a symbol path in the SDK.
  *
@@ -732,7 +823,15 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
     return `// Note: '${trimmed}' is located at 'client.${suffixMethods[0]}'\n${types(schema, suffixMethods[0])}`;
   }
 
-  // 7. Symbol not found -> provide closest suggestions + parent group popup if prefix matched
+  // 7. Keyword / route / summary search when symbol is not an exact path (e.g. "kv", "purge cache", "/storage/kv")
+  if (lastDot === -1 || !schema.groups[trimmed.slice(0, lastDot)]) {
+    const keywordResults = searchByKeywords(schema, trimmed);
+    if (keywordResults !== undefined) {
+      return keywordResults;
+    }
+  }
+
+  // 8. Symbol not found -> provide closest suggestions + parent group popup if prefix matched
   const suggestions = findSuggestions(schema, trimmed);
   const suggestionText = suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `'${s}'`).join(', ')}?` : '';
   if (lastDot !== -1) {
@@ -1483,6 +1582,7 @@ export function wrapClient<T extends object>(
         const ownerType = groupPath === '' ? 'Client' : `${groupPath}.Client`;
         const lowerSuffix = `.${fullPath.toLowerCase()}`;
         const suffixGroup = Object.keys(schema.groups).find((g) => g.toLowerCase().endsWith(lowerSuffix));
+        const keywordMatches = !suffixGroup && groupPath === '' ? searchByKeywords(schema, fullPath) : undefined;
         const hint = suffixGroup
           ? ` Did you mean 'client.${suffixGroup}'?`
           : closest && closest.dist <= 3
@@ -1490,7 +1590,7 @@ export function wrapClient<T extends object>(
             : available.length > 0
               ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
               : '';
-        const defTarget = suffixGroup ?? groupPath;
+        const defBody = suffixGroup ? types(schema, suffixGroup) : (keywordMatches ?? types(schema, groupPath));
         throw new TypeFeedbackError(
           [
             {
@@ -1499,7 +1599,7 @@ export function wrapClient<T extends object>(
               message: `Property '${prop}' does not exist on type '${ownerType}'.${hint}`,
             },
           ],
-          types(schema, defTarget),
+          defBody,
         );
       }
 
@@ -1978,14 +2078,14 @@ export function createProgressiveMcp<T extends object>(
       {
         name: 'types',
         description:
-          'Inspect 1-level TypeScript (.d.ts) definitions and JSDoc for any SDK namespace, method, or model (e.g. "dns.records", "dns.records.create", "d1", "queues.messages", "r2.buckets"). Nested models stay nominal until inspected.',
+          'Inspect or search 1-level TypeScript (.d.ts) definitions and JSDoc for any SDK namespace, method, model, or keyword/route (e.g. "dns.records", "dns.records.create", "kv", "purge cache"). Nested models stay nominal until inspected.',
         inputSchema: {
           type: 'object',
           properties: {
             symbol: {
               type: 'string',
               description:
-                'Dot-separated symbol path in the generated TypeScript SDK (e.g. "dns.records", "dns.records.create", or omit for top-level index).',
+                'Dot-separated SDK symbol path (e.g. "dns.records.create") or search term / route keyword (e.g. "kv", "purge cache", or omit for top-level index).',
             },
           },
         },

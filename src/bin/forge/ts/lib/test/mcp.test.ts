@@ -610,4 +610,15 @@ describe('Progressive Type-Feedback MCP runtime', () => {
       assert.equal(safeRes.replaySafe, true);
     }
   });
+
+  test('types() supports keyword and route search when the agent only has a search term', () => {
+    const byKeyword = types(schema, 'create bucket');
+    assert.match(byKeyword, /client\.r2\.buckets\.create/);
+    assert.match(byKeyword, /export interface CreateRequest \{/);
+
+    const byMultiMatch = types(schema, 'dns records');
+    assert.match(byMultiMatch, /Search matches for 'dns records'/);
+    assert.match(byMultiMatch, /create\(request: CreateRequest/);
+    assert.match(byMultiMatch, /list\(request: ListRequest/);
+  });
 });
