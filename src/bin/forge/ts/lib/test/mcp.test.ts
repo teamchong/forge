@@ -4,8 +4,8 @@ import {
   type ApiSchema,
   createProgressiveMcp,
   execute,
-  hover,
   TypeFeedbackError,
+  types,
   wrapClient,
 } from '../../../mcp/runtime.js';
 
@@ -283,20 +283,20 @@ function makeFakeClient() {
 }
 
 describe('Progressive Type-Feedback MCP runtime', () => {
-  test('hover() at root renders 1-level top namespaces without dumping nested methods', () => {
-    const out = hover(schema);
+  test('types() at root renders 1-level top namespaces without dumping nested methods', () => {
+    const out = types(schema);
     assert.match(out, /export interface Client \{/);
     assert.match(out, /readonly dns: dns\.Client;/);
     assert.match(out, /readonly zones: zones\.Client;/);
     assert.doesNotMatch(out, /CreateRequest/);
   });
 
-  test('hover() on namespace renders 1-level sub-groups and method signatures', () => {
-    const dnsOut = hover(schema, 'dns');
+  test('types() on namespace renders 1-level sub-groups and method signatures', () => {
+    const dnsOut = types(schema, 'dns');
     assert.match(dnsOut, /export namespace dns \{/);
     assert.match(dnsOut, /readonly records: dns\.records\.Client;/);
 
-    const recordsOut = hover(schema, 'dns.records');
+    const recordsOut = types(schema, 'dns.records');
     assert.match(recordsOut, /export namespace dns\.records \{/);
     assert.match(recordsOut, /create\(request: CreateRequest, options\?: RequestOptions\): Promise<CreateResponse>;/);
     assert.match(recordsOut, /list\(request: ListRequest, options\?: RequestOptions\): Promise<ListResponse>;/);
@@ -304,32 +304,47 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.doesNotMatch(recordsOut, /flattenCname/);
   });
 
-  test('hover() on method renders 1-level request/response types and keeps nested models nominal', () => {
-    const createOut = hover(schema, 'dns.records.create');
+  test('types() on method renders 1-level request/response types and keeps nested models nominal', () => {
+    const createOut = types(schema, 'dns.records.create');
     assert.match(createOut, /export interface CreateRequest \{/);
     assert.match(createOut, /zoneId: string; \/\/ path param/);
     assert.match(createOut, /type: 'A' \| 'AAAA' \| 'CNAME';/);
     assert.match(createOut, /settings\?: dns\.records\.RecordSettings;/);
-    // RecordSettings fields are nominal until hovered
+    // RecordSettings fields are nominal until inspected
     assert.doesNotMatch(createOut, /flattenCname/);
-    assert.match(createOut, /Referenced models \(use hover\("<model>"\) to inspect\): dns\.records\.RecordSettings/);
+    assert.match(createOut, /Referenced models \(use types\("<model>"\) to inspect\): .*dns\.records\.RecordSettings/);
   });
 
-  test('hover() on model (qualified or unqualified) expands its 1-level fields', () => {
-    const byFull = hover(schema, 'dns.records.RecordSettings');
-    const byShort = hover(schema, 'RecordSettings');
+  test('types() on model (qualified or unqualified) expands its 1-level fields', () => {
+    const byFull = types(schema, 'dns.records.RecordSettings');
+    const byShort = types(schema, 'RecordSettings');
     assert.equal(byFull, byShort);
     assert.match(byFull, /export interface RecordSettings \{/);
     assert.match(byFull, /ipv4Only\?: boolean;/);
     assert.match(byFull, /flattenCname\?: boolean;/);
   });
 
-  test('hover() on unknown symbol returns compiler-style error and fuzzy suggestions', () => {
-    const unknownMember = hover(schema, 'dns.records.creat');
+  test('types() on unknown symbol returns compiler-style error and fuzzy suggestions', () => {
+    const unknownMember = types(schema, 'dns.records.creat');
     assert.match(unknownMember, /TS2339: Symbol 'dns\.records\.creat' does not exist on 'dns\.records'\./);
     assert.match(unknownMember, /Did you mean: 'dns\.records\.create'/);
   });
 
+  test('execute() inspects uninvoked namespaces, methods, and models directly like a REPL', async () => {
+    const { client, calls } = makeFakeClient();
+    const groupInspect = await execute(client, schema, 'client.dns.records');
+    assert.equal(groupInspect.ok, true);
+    assert.match(String(groupInspect.result), /export namespace dns\.records \{/);
+
+    const methodInspect = await execute(client, schema, 'client.dns.records.create');
+    assert.equal(methodInspect.ok, true);
+    assert.match(String(methodInspect.result), /export interface CreateRequest \{/);
+
+    const modelInspect = await execute(client, schema, 'client.dns.records.RecordSettings');
+    assert.equal(modelInspect.ok, true);
+    assert.match(String(modelInspect.result), /export interface RecordSettings \{/);
+    assert.equal(calls.length, 0);
+  });
   test('execute() runs valid SDK calls against wrapped client', async () => {
     const { client, calls } = makeFakeClient();
     const res = await execute(
@@ -354,14 +369,14 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     });
   });
 
-  test('execute() catches unknown method name with TS2339 and attaches namespace hover popup', async () => {
+  test('execute() catches unknown method name with TS2339 and attaches namespace .d.ts definition', async () => {
     const { client, calls } = makeFakeClient();
     const res = await execute(client, schema, `await client.dns.records.add({ zoneId: 'z1' })`);
     assert.equal(res.ok, false);
     assert.equal(calls.length, 0);
     assert.equal(res.issues?.[0]?.code, 'TS2339');
     assert.match(res.error ?? '', /Available on 'dns\.records\.Client': create, list\./);
-    assert.match(res.typePopup ?? '', /export namespace dns\.records \{/);
+    assert.match(res.typeDefinition ?? '', /export namespace dns\.records \{/);
   });
 
   test('execute() catches snake_case wireName mistakes with TS2561 and suggests camelCase SDK property', async () => {
@@ -371,21 +386,21 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.equal(calls.length, 0);
     assert.ok(res.issues?.some((i) => i.code === 'TS2561' && i.message.includes("Did you mean 'zoneId'")));
     assert.ok(res.issues?.some((i) => i.code === 'TS2561' && i.message.includes("Did you mean 'perPage'")));
-    assert.match(res.typePopup ?? '', /export interface ListRequest \{/);
+    assert.match(res.typeDefinition ?? '', /export interface ListRequest \{/);
   });
 
-  test('execute() catches read-only field assignment and nested model type errors with both popups', async () => {
+  test('execute() catches read-only field assignment and nested model type errors with both .d.ts definitions', async () => {
     const { client, calls } = makeFakeClient();
     const res = await execute(
       client,
       schema,
       `await client.dns.records.create({
-        zoneId: 'z1',
-        id: 'cannot_set',
-        name: 'example.com',
-        type: 'A',
-        settings: { ipv4Only: 'not_a_boolean' }
-      })`,
+         zoneId: 'z1',
+         id: 'cannot_set',
+         name: 'example.com',
+         type: 'A',
+         settings: { ipv4Only: 'not_a_boolean' }
+       })`,
     );
     assert.equal(res.ok, false);
     assert.equal(calls.length, 0);
@@ -396,20 +411,19 @@ describe('Progressive Type-Feedback MCP runtime', () => {
           i.code === 'TS2322' && i.path === 'request.settings.ipv4Only' && i.symbol === 'dns.records.RecordSettings',
       ),
     );
-    // Auto-attaches both the method popup AND the nested RecordSettings model popup!
-    assert.match(res.typePopup ?? '', /export interface CreateRequest \{/);
-    assert.match(res.typePopup ?? '', /export interface RecordSettings \{/);
+    assert.match(res.typeDefinition ?? '', /export interface CreateRequest \{/);
+    assert.match(res.typeDefinition ?? '', /export interface RecordSettings \{/);
   });
 
-  test('createProgressiveMcp() exposes hover and execute MCP tools', async () => {
+  test('createProgressiveMcp() exposes types and execute MCP tools', async () => {
     const { client } = makeFakeClient();
     const mcp = createProgressiveMcp(client, schema);
     assert.equal(mcp.tools.length, 2);
-    assert.equal(mcp.tools[0]?.name, 'hover');
+    assert.equal(mcp.tools[0]?.name, 'types');
     assert.equal(mcp.tools[1]?.name, 'execute');
 
-    const hoverRes = await mcp.tools[0]!.handler({ symbol: 'dns.records.RecordSettings' });
-    assert.match(String(hoverRes), /export interface RecordSettings/);
+    const typesRes = await mcp.tools[0]!.handler({ symbol: 'dns.records.RecordSettings' });
+    assert.match(String(typesRes), /export interface RecordSettings/);
 
     const wrapped = wrapClient(client, schema);
     assert.throws(() => Reflect.get(wrapped.dns.records, 'nonExistent'), TypeFeedbackError);

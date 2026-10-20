@@ -106,18 +106,18 @@ export interface ValidationIssue {
 /**
  * Thrown when agent code accesses a non-existent SDK symbol or passes arguments
  * that violate the OpenAPI/TypeScript types. Includes compiler-style diagnostics
- * and progressive 1-level `.d.ts` type popups for immediate self-correction.
+ * and progressive 1-level `.d.ts` type definitions for immediate self-correction.
  */
 export class TypeFeedbackError extends Error {
   readonly issues: readonly ValidationIssue[];
-  readonly typePopup: string;
+  readonly typeDefinition: string;
 
-  constructor(issues: readonly ValidationIssue[], typePopup: string) {
+  constructor(issues: readonly ValidationIssue[], typeDefinition: string) {
     const summary = issues.map((issue) => `${issue.code} at ${issue.path}: ${issue.message}`).join('\n');
-    super(`${summary}\n\n--- Progressive Type Popup ---\n${typePopup}`);
+    super(`${summary}\n\n--- TypeScript Definition (.d.ts) ---\n${typeDefinition}`);
     this.name = 'TypeFeedbackError';
     this.issues = issues;
-    this.typePopup = typePopup;
+    this.typeDefinition = typeDefinition;
   }
 }
 
@@ -193,27 +193,59 @@ function formatPropertyKey(name: string): string {
   return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name) ? name : formatLiteral(name);
 }
 
-function collectReferencedModels(type: TypeSchema | undefined, out: Set<string>): void {
+function isLeafType(schema: ApiSchema | undefined, type: TypeSchema, seen = new Set<string>()): boolean {
+  switch (type.kind) {
+    case 'scalar':
+    case 'enum':
+      return true;
+    case 'array':
+      return isLeafType(schema, type.elem, seen);
+    case 'model': {
+      if (!schema || seen.has(type.model)) {
+        return false;
+      }
+      const model = schema.models[type.model];
+      if (!model) {
+        return false;
+      }
+      seen.add(type.model);
+      return isLeafType(schema, model.type, seen);
+    }
+    case 'union':
+      return (
+        type.members.length > 0 &&
+        type.members.length <= 6 &&
+        type.members.every((m) => isLeafType(schema, m, new Set(seen)))
+      );
+    case 'object':
+    case 'intersection':
+      return false;
+  }
+}
+
+function collectReferencedModels(schema: ApiSchema, type: TypeSchema | undefined, out: Set<string>): void {
   if (!type) {
     return;
   }
   switch (type.kind) {
     case 'model':
-      out.add(type.model);
+      if (!isLeafType(schema, type)) {
+        out.add(type.model);
+      }
       break;
     case 'array':
-      collectReferencedModels(type.elem, out);
+      collectReferencedModels(schema, type.elem, out);
       break;
     case 'object':
       for (const field of type.fields) {
-        collectReferencedModels(field.type, out);
+        collectReferencedModels(schema, field.type, out);
       }
-      collectReferencedModels(type.extra, out);
+      collectReferencedModels(schema, type.extra, out);
       break;
     case 'union':
     case 'intersection':
       for (const member of type.members) {
-        collectReferencedModels(member, out);
+        collectReferencedModels(schema, member, out);
       }
       break;
     case 'scalar':
@@ -222,12 +254,26 @@ function collectReferencedModels(type: TypeSchema | undefined, out: Set<string>)
   }
 }
 
-function formatTypeExpr(type: TypeSchema, prec: 'top' | 'union' | 'intersection' | 'postfix' = 'top'): string {
+function formatTypeExpr(
+  type: TypeSchema,
+  prec: 'top' | 'union' | 'intersection' | 'postfix' = 'top',
+  schema?: ApiSchema,
+  seen = new Set<string>(),
+): string {
   switch (type.kind) {
     case 'scalar':
       return type.scalar;
-    case 'model':
+    case 'model': {
+      if (schema && !seen.has(type.model)) {
+        const model = schema.models[type.model];
+        if (model && isLeafType(schema, model.type)) {
+          const nextSeen = new Set(seen);
+          nextSeen.add(type.model);
+          return formatTypeExpr(model.type, prec, schema, nextSeen);
+        }
+      }
       return type.model;
+    }
     case 'enum': {
       if (type.values.length === 0) {
         return 'never';
@@ -236,7 +282,7 @@ function formatTypeExpr(type: TypeSchema, prec: 'top' | 'union' | 'intersection'
       return type.values.length > 1 && (prec === 'intersection' || prec === 'postfix') ? `(${joined})` : joined;
     }
     case 'array':
-      return `${formatTypeExpr(type.elem, 'postfix')}[]`;
+      return `${formatTypeExpr(type.elem, 'postfix', schema, seen)}[]`;
     case 'object': {
       const parts: string[] = [];
       for (const field of type.fields) {
@@ -244,10 +290,12 @@ function formatTypeExpr(type: TypeSchema, prec: 'top' | 'union' | 'intersection'
           continue;
         }
         const opt = field.required ? '' : '?';
-        parts.push(`${formatPropertyKey(field.name)}${opt}: ${formatTypeExpr(field.type, 'top')}`);
+        parts.push(`${formatPropertyKey(field.name)}${opt}: ${formatTypeExpr(field.type, 'top', schema, seen)}`);
       }
       if (type.extra) {
-        parts.push(`[key: string]: ${formatTypeExpr(type.extra, 'top') === 'unknown' ? 'unknown' : 'unknown'}`);
+        parts.push(
+          `[key: string]: ${formatTypeExpr(type.extra, 'top', schema, seen) === 'unknown' ? 'unknown' : 'unknown'}`,
+        );
       }
       if (parts.length === 0) {
         return 'Record<string, never>';
@@ -258,20 +306,21 @@ function formatTypeExpr(type: TypeSchema, prec: 'top' | 'union' | 'intersection'
       if (type.members.length === 0) {
         return 'never';
       }
-      const joined = type.members.map((m) => formatTypeExpr(m, 'union')).join(' | ');
+      const joined = type.members.map((m) => formatTypeExpr(m, 'union', schema, seen)).join(' | ');
       return type.members.length > 1 && (prec === 'intersection' || prec === 'postfix') ? `(${joined})` : joined;
     }
     case 'intersection': {
       if (type.members.length === 0) {
         return 'unknown';
       }
-      const joined = type.members.map((m) => formatTypeExpr(m, 'intersection')).join(' & ');
+      const joined = type.members.map((m) => formatTypeExpr(m, 'intersection', schema, seen)).join(' & ');
       return type.members.length > 1 && prec === 'postfix' ? `(${joined})` : joined;
     }
   }
 }
 
 function renderFieldsBlock(
+  schema: ApiSchema,
   fields: readonly FieldSchema[],
   extra: TypeSchema | undefined,
   indent: string,
@@ -284,16 +333,17 @@ function renderFieldsBlock(
       continue;
     }
     hasKeptField = true;
-    const doc = formatJsDoc(field.description, field.deprecated, indent);
+    const desc = fields.length > 8 ? firstSummaryLine(field.description) : field.description;
+    const doc = formatJsDoc(desc, field.deprecated, indent);
     const ro = field.readonly ? 'readonly ' : '';
     const opt = field.required ? '' : '?';
     const locComment = field.location ? ` // ${field.location} param` : '';
     lines.push(
-      `${doc}${indent}${ro}${formatPropertyKey(field.name)}${opt}: ${formatTypeExpr(field.type)};${locComment}`,
+      `${doc}${indent}${ro}${formatPropertyKey(field.name)}${opt}: ${formatTypeExpr(field.type, 'top', schema)};${locComment}`,
     );
   }
   if (extra) {
-    const keyType = hasKeptField ? 'unknown' : formatTypeExpr(extra);
+    const keyType = hasKeptField ? 'unknown' : formatTypeExpr(extra, 'top', schema);
     lines.push(`${indent}[key: string]: ${keyType};`);
   }
   return lines.join('\n');
@@ -313,7 +363,7 @@ function renderMethodSignature(method: MethodSchema, indent = '  ', brief = fals
   return `${doc}${indent}${formatPropertyKey(method.name)}(${reqParam}): Promise<${method.responseTypeName}>; // ${method.httpMethod} ${method.route}`;
 }
 
-function renderRequestDeclaration(method: MethodSchema): string | undefined {
+function renderRequestDeclaration(schema: ApiSchema, method: MethodSchema): string | undefined {
   const name = method.requestTypeName;
   if (!name) {
     return undefined;
@@ -321,20 +371,29 @@ function renderRequestDeclaration(method: MethodSchema): string | undefined {
   const params = method.requestParams;
   const body = method.requestBody;
   if (!body) {
-    const block = renderFieldsBlock(params, undefined, '  ', false);
-    return block === '' ? `export type ${name} = Record<string, never>;` : `export interface ${name} {\n${block}\n}`;
-  }
-  if (method.requestFlat && body.type.kind === 'object') {
-    const combined = [...params, ...body.type.fields.filter((f) => !f.readonly)];
-    const block = renderFieldsBlock(combined, body.type.extra, '  ', false);
+    const block = renderFieldsBlock(schema, params, undefined, '  ', false);
     return block === '' ? `export type ${name} = Record<string, never>;` : `export interface ${name} {\n${block}\n}`;
   }
   if (method.requestFlat) {
-    if (params.length === 0) {
-      return `export type ${name} = ${formatTypeExpr(body.type)};`;
+    const flatObj = resolveFlatObjectType(schema, body.type, new Set(), true);
+    if (flatObj) {
+      const byName = new Map<string, FieldSchema>();
+      for (const f of flatObj.fields) {
+        if (!f.readonly) {
+          byName.set(f.name, f);
+        }
+      }
+      for (const p of params) {
+        byName.set(p.name, p);
+      }
+      const block = renderFieldsBlock(schema, Array.from(byName.values()), flatObj.extra, '  ', false);
+      return block === '' ? `export type ${name} = Record<string, never>;` : `export interface ${name} {\n${block}\n}`;
     }
-    const paramsBlock = renderFieldsBlock(params, undefined, '  ', false);
-    return `export type ${name} = {\n${paramsBlock}\n} & ${formatTypeExpr(body.type, 'intersection')};`;
+    if (params.length === 0) {
+      return `export type ${name} = ${formatTypeExpr(body.type, 'top', schema)};`;
+    }
+    const paramsBlock = renderFieldsBlock(schema, params, undefined, '  ', false);
+    return `export type ${name} = {\n${paramsBlock}\n} & ${formatTypeExpr(body.type, 'intersection', schema)};`;
   }
   const bodyField: FieldSchema = {
     name: 'body',
@@ -343,30 +402,31 @@ function renderRequestDeclaration(method: MethodSchema): string | undefined {
     description: body.description,
     type: body.type,
   };
-  const block = renderFieldsBlock([...params, bodyField], undefined, '  ', false);
+  const block = renderFieldsBlock(schema, [...params, bodyField], undefined, '  ', false);
   return `export interface ${name} {\n${block}\n}`;
 }
 
-function renderResponseDeclaration(method: MethodSchema): string {
+function renderResponseDeclaration(schema: ApiSchema, method: MethodSchema): string {
   const name = method.responseTypeName;
   if (!method.responseType) {
     return `export type ${name} = void;`;
   }
   if (method.responseType.kind === 'object' && !method.responseOptional && method.responseType.fields.length > 0) {
-    const block = renderFieldsBlock(method.responseType.fields, method.responseType.extra, '  ', true);
+    const block = renderFieldsBlock(schema, method.responseType.fields, method.responseType.extra, '  ', true);
     return `export interface ${name} {\n${block}\n}`;
   }
-  const expr = formatTypeExpr(method.responseType);
-  return method.responseOptional ? `export type ${name} = ${expr} | undefined;` : `export type ${name} = ${expr};`;
+  const expr = formatTypeExpr(method.responseType, 'top', schema);
+  return method.responseOptional ? `export type ${name} = (${expr}) | undefined;` : `export type ${name} = ${expr};`;
 }
 
-function renderModelDeclaration(model: ModelSchema): string {
+function renderModelDeclaration(schema: ApiSchema, model: ModelSchema): string {
   const doc = formatJsDoc(model.description, model.deprecated, '');
-  if (model.type.kind === 'object' && model.type.fields.length > 0) {
-    const block = renderFieldsBlock(model.type.fields, model.type.extra, '  ', true);
+  const flatObj = resolveFlatObjectType(schema, model.type, new Set(), true);
+  if (flatObj && flatObj.fields.length > 0) {
+    const block = renderFieldsBlock(schema, flatObj.fields, flatObj.extra, '  ', true);
     return `${doc}export interface ${model.name} {\n${block}\n}`;
   }
-  return `${doc}export type ${model.name} = ${formatTypeExpr(model.type)};`;
+  return `${doc}export type ${model.name} = ${formatTypeExpr(model.type, 'top', schema)};`;
 }
 
 function countGroupMethods(schema: ApiSchema, groupPath: string): number {
@@ -417,8 +477,13 @@ function findSuggestions(schema: ApiSchema, query: string, limit = 5): string[] 
   for (const model of Object.values(schema.models)) {
     candidates.push(model.path);
   }
+  const ql = query.toLowerCase();
   return candidates
     .map((candidate) => {
+      const cl = candidate.toLowerCase();
+      if (cl.endsWith(`.${ql}`)) {
+        return { candidate, score: 0.1 };
+      }
       const short = candidate.split('.').pop() ?? candidate;
       const queryShort = query.split('.').pop() ?? query;
       const score = Math.min(editDistance(query, candidate), editDistance(queryShort, short) + 0.5);
@@ -430,15 +495,15 @@ function findSuggestions(schema: ApiSchema, query: string, limit = 5): string[] 
 }
 
 /**
- * Returns a progressive 1-level `.d.ts` type & JSDoc view for a symbol path in the SDK.
+ * Returns a progressive 1-level `.d.ts` TypeScript & JSDoc definition for a symbol path in the SDK.
  *
  * Examples:
- * - `hover(schema)` or `hover(schema, "client")` -> top-level `Client` namespaces
- * - `hover(schema, "dns.records")` -> 1-level `dns.records.Client` methods & sub-groups
- * - `hover(schema, "dns.records.create")` -> method signature + 1-level `CreateRequest` & `CreateResponse`
- * - `hover(schema, "dns.records.RecordSettings")` -> 1-level `RecordSettings` model declaration
+ * - `types(schema)` or `types(schema, "client")` -> top-level `Client` namespaces
+ * - `types(schema, "dns.records")` -> 1-level `dns.records.Client` methods & sub-groups
+ * - `types(schema, "dns.records.create")` -> method signature + 1-level `CreateRequest` & `CreateResponse`
+ * - `types(schema, "dns.records.RecordSettings")` -> 1-level `RecordSettings` model declaration
  */
-export function hover(schema: ApiSchema, rawSymbol?: string): string {
+export function types(schema: ApiSchema, rawSymbol?: string): string {
   const trimmed = (rawSymbol ?? '').trim().replace(/^client\.?/, '');
 
   // 1. Root Client view
@@ -449,7 +514,7 @@ export function hover(schema: ApiSchema, rawSymbol?: string): string {
     const totalModels = Object.keys(schema.models).length;
     lines.push(`// API Version: ${schema.version}${schema.baseUrl ? ` | Base URL: ${schema.baseUrl}` : ''}`);
     lines.push(`// ${totalGroups} groups, ${totalMethods} methods, ${totalModels} models`);
-    lines.push('// Tip: call hover("<group>") or hover("<group>.<method>") to drill down 1 level at a time.');
+    lines.push('// Tip: inspect `client.<group>` or call `types("<group>.<method>")` to drill down 1 level at a time.');
     const rootSummary = firstSummaryLine(schema.description);
     if (rootSummary) {
       lines.push(formatJsDoc(rootSummary, false, '').trimEnd());
@@ -460,17 +525,13 @@ export function hover(schema: ApiSchema, rawSymbol?: string): string {
       if (!childGroup) {
         continue;
       }
-      const doc = formatJsDoc(firstSummaryLine(childGroup.description), false, '  ');
       const methodCount = countGroupMethods(schema, childName);
       const childList =
-        childGroup.children.length > 5
-          ? `${childGroup.children.slice(0, 5).join(', ')}, +${childGroup.children.length - 5} more`
+        childGroup.children.length > 4
+          ? `${childGroup.children.slice(0, 4).join(', ')}, +${childGroup.children.length - 4}`
           : childGroup.children.join(', ');
-      const subSummary =
-        childGroup.children.length > 0
-          ? `${childGroup.children.length} sub-groups (${childList}), ${methodCount} total methods`
-          : `${methodCount} methods`;
-      lines.push(`${doc}  readonly ${formatPropertyKey(childName)}: ${childName}.Client; // ${subSummary}`);
+      const subSummary = childGroup.children.length > 0 ? `${childList} (${methodCount}m)` : `${methodCount}m`;
+      lines.push(`  readonly ${formatPropertyKey(childName)}: ${childName}.Client; // ${subSummary}`);
     }
     lines.push('}');
     if (schema.rootModels.length > 0) {
@@ -518,13 +579,21 @@ export function hover(schema: ApiSchema, rawSymbol?: string): string {
   // 3. Exact model match (e.g. "pets.Pet" or top-level "Pet")
   const exactModel = schema.models[trimmed];
   if (exactModel) {
-    const decl = renderModelDeclaration(exactModel);
+    const decl = renderModelDeclaration(schema, exactModel);
     const refs = new Set<string>();
-    collectReferencedModels(exactModel.type, refs);
+    const flatObj = resolveFlatObjectType(schema, exactModel.type, new Set(), true);
+    if (flatObj && flatObj.fields.length > 0) {
+      for (const f of flatObj.fields) {
+        collectReferencedModels(schema, f.type, refs);
+      }
+      collectReferencedModels(schema, flatObj.extra, refs);
+    } else {
+      collectReferencedModels(schema, exactModel.type, refs);
+    }
     refs.delete(exactModel.path);
     const footer =
       refs.size > 0
-        ? `\n\n// Referenced models (use hover("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
+        ? `\n\n// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
         : '';
     return `// Model: ${exactModel.path} (OpenAPI schema '${exactModel.schemaName}')\n${decl}${footer}`;
   }
@@ -541,68 +610,90 @@ export function hover(schema: ApiSchema, rawSymbol?: string): string {
         const blocks: string[] = [];
         blocks.push(`// Method: client.${method.path} (${method.httpMethod} ${method.route})`);
         blocks.push(renderMethodSignature(method, ''));
-        const reqDecl = renderRequestDeclaration(method);
+        const reqDecl = renderRequestDeclaration(schema, method);
         if (reqDecl) {
           blocks.push(reqDecl);
         }
-        blocks.push(renderResponseDeclaration(method));
+        blocks.push(renderResponseDeclaration(schema, method));
         const refs = new Set<string>();
         for (const p of method.requestParams) {
-          collectReferencedModels(p.type, refs);
+          collectReferencedModels(schema, p.type, refs);
         }
+        const flatReqExpanded =
+          method.requestFlat && method.requestBody
+            ? resolveFlatObjectType(schema, method.requestBody.type, new Set(), true) !== undefined
+            : false;
         if (method.requestBody) {
-          collectReferencedModels(method.requestBody.type, refs);
-        }
-        collectReferencedModels(method.responseType, refs);
-        // If requestBody or responseType is a direct single model, expand 1 level of that model immediately
-        if (method.requestBody?.type.kind === 'model') {
-          const reqModel = schema.models[method.requestBody.type.model];
-          if (reqModel) {
-            blocks.push(`// Model: ${reqModel.path}\n${renderModelDeclaration(reqModel)}`);
-            refs.delete(reqModel.path);
-            collectReferencedModels(reqModel.type, refs);
+          if (flatReqExpanded) {
+            const flatObj = resolveFlatObjectType(schema, method.requestBody.type, new Set(), true);
+            if (flatObj) {
+              for (const f of flatObj.fields) {
+                collectReferencedModels(schema, f.type, refs);
+              }
+              collectReferencedModels(schema, flatObj.extra, refs);
+            }
+          } else {
+            collectReferencedModels(schema, method.requestBody.type, refs);
           }
         }
-        const reqBodyModel = method.requestBody?.type.kind === 'model' ? method.requestBody.type.model : undefined;
-        if (method.responseType?.kind === 'model' && method.responseType.model !== reqBodyModel) {
-          const respModel = schema.models[method.responseType.model];
-          if (respModel) {
-            blocks.push(`// Model: ${respModel.path}\n${renderModelDeclaration(respModel)}`);
-            refs.delete(respModel.path);
-            collectReferencedModels(respModel.type, refs);
+        collectReferencedModels(schema, method.responseType, refs);
+        // If requestBody or responseType is a direct single model (not already expanded into flat CreateRequest), expand 1 level of that model immediately
+        const reqBodyModel =
+          !flatReqExpanded && method.requestBody?.type.kind === 'model' ? method.requestBody.type.model : undefined;
+        if (reqBodyModel) {
+          const reqModel = schema.models[reqBodyModel];
+          if (reqModel) {
+            blocks.push(`// Model: ${reqModel.path}\n${renderModelDeclaration(schema, reqModel)}`);
+            refs.delete(reqModel.path);
+            const subRefs = new Set<string>();
+            collectReferencedModels(schema, reqModel.type, subRefs);
+            if (resolveFlatObjectType(schema, reqModel.type, new Set(), true) === undefined && subRefs.size <= 3) {
+              for (const subPath of subRefs) {
+                const subModel = schema.models[subPath];
+                if (subModel) {
+                  blocks.push(`// Model: ${subModel.path}\n${renderModelDeclaration(schema, subModel)}`);
+                  refs.delete(subModel.path);
+                  collectReferencedModels(schema, subModel.type, refs);
+                }
+              }
+            } else {
+              for (const r of subRefs) {
+                refs.add(r);
+              }
+            }
           }
         }
         if (refs.size > 0) {
-          blocks.push(`// Referenced models (use hover("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`);
+          blocks.push(`// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`);
         }
         return blocks.join('\n\n');
       }
 
       const reqMethod = parentGroup.methods.find((m) => m.requestTypeName === leaf);
       if (reqMethod) {
-        const reqDecl = renderRequestDeclaration(reqMethod) ?? '';
+        const reqDecl = renderRequestDeclaration(schema, reqMethod) ?? '';
         const refs = new Set<string>();
         for (const p of reqMethod.requestParams) {
-          collectReferencedModels(p.type, refs);
+          collectReferencedModels(schema, p.type, refs);
         }
         if (reqMethod.requestBody) {
-          collectReferencedModels(reqMethod.requestBody.type, refs);
+          collectReferencedModels(schema, reqMethod.requestBody.type, refs);
         }
         const footer =
           refs.size > 0
-            ? `\n\n// Referenced models (use hover("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
+            ? `\n\n// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
             : '';
         return `// Request type for client.${reqMethod.path}\n${reqDecl}${footer}`;
       }
 
       const respMethod = parentGroup.methods.find((m) => m.responseTypeName === leaf);
       if (respMethod) {
-        const respDecl = renderResponseDeclaration(respMethod);
+        const respDecl = renderResponseDeclaration(schema, respMethod);
         const refs = new Set<string>();
-        collectReferencedModels(respMethod.responseType, refs);
+        collectReferencedModels(schema, respMethod.responseType, refs);
         const footer =
           refs.size > 0
-            ? `\n\n// Referenced models (use hover("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
+            ? `\n\n// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
             : '';
         return `// Response type for client.${respMethod.path}\n${respDecl}${footer}`;
       }
@@ -612,22 +703,39 @@ export function hover(schema: ApiSchema, rawSymbol?: string): string {
   // 5. Unqualified model name lookup (e.g. "RecordSettings" when unique or matching models)
   const matchingModels = Object.values(schema.models).filter((m) => m.name === trimmed || m.schemaName === trimmed);
   if (matchingModels.length === 1) {
-    return hover(schema, matchingModels[0]!.path);
+    return types(schema, matchingModels[0]!.path);
   }
   if (matchingModels.length > 1) {
     return (
       `Multiple models match '${trimmed}': ${matchingModels.map((m) => m.path).join(', ')}.\n\n` +
-      hover(schema, matchingModels[0]!.path)
+      types(schema, matchingModels[0]!.path)
     );
   }
+  // 6. Suffix match on group or method path (e.g. "access.applications" -> "zeroTrust.access.applications")
+  const lowerSuffix = `.${trimmed.toLowerCase()}`;
+  const suffixGroups = Object.keys(schema.groups).filter((g) => g.toLowerCase().endsWith(lowerSuffix));
+  if (suffixGroups.length === 1 && suffixGroups[0]) {
+    return `// Note: '${trimmed}' is located at 'client.${suffixGroups[0]}'\n${types(schema, suffixGroups[0])}`;
+  }
+  const suffixMethods: string[] = [];
+  for (const g of Object.values(schema.groups)) {
+    for (const m of g.methods) {
+      if (m.path.toLowerCase().endsWith(lowerSuffix)) {
+        suffixMethods.push(m.path);
+      }
+    }
+  }
+  if (suffixMethods.length === 1 && suffixMethods[0]) {
+    return `// Note: '${trimmed}' is located at 'client.${suffixMethods[0]}'\n${types(schema, suffixMethods[0])}`;
+  }
 
-  // 6. Symbol not found -> provide closest suggestions + parent group popup if prefix matched
+  // 7. Symbol not found -> provide closest suggestions + parent group popup if prefix matched
   const suggestions = findSuggestions(schema, trimmed);
   const suggestionText = suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `'${s}'`).join(', ')}?` : '';
   if (lastDot !== -1) {
     const parentPath = trimmed.slice(0, lastDot);
     if (schema.groups[parentPath]) {
-      return `TS2339: Symbol '${trimmed}' does not exist on '${parentPath}'.${suggestionText}\n\n${hover(schema, parentPath)}`;
+      return `TS2339: Symbol '${trimmed}' does not exist on '${parentPath}'.${suggestionText}\n\n${types(schema, parentPath)}`;
     }
   }
   return `TS2304: Cannot find symbol '${trimmed}'.${suggestionText}`;
@@ -824,9 +932,8 @@ function validateValue(
         }
         memberTrials.push({ member, trial });
       }
-      if (isPlainRecord(value) && type.discriminator) {
-        const discVal = value[type.discriminator];
-        if (discVal !== undefined) {
+      if (isPlainRecord(value)) {
+        if (type.discriminator && value[type.discriminator] !== undefined) {
           const matching = memberTrials.filter(
             ({ trial }) => !trial.some((iss) => iss.path === `${path}.${type.discriminator}`),
           );
@@ -835,11 +942,18 @@ function validateValue(
             return;
           }
         }
+        const deepMatches = memberTrials
+          .filter(({ trial }) => trial.length > 0 && trial.every((iss) => iss.path.startsWith(`${path}.`)))
+          .sort((a, b) => a.trial.length - b.trial.length);
+        if (deepMatches[0]) {
+          issues.push(...deepMatches[0].trial);
+          return;
+        }
       }
       issues.push({
         code: 'TS2322',
         path,
-        message: `Type '${describeValue(value)}' is not assignable to type '${formatTypeExpr(type)}'.`,
+        message: `Type '${describeValue(value)}' is not assignable to type '${formatTypeExpr(type, 'top', schema)}'.`,
         symbol: currentModelSymbol,
       });
       return;
@@ -872,6 +986,7 @@ function resolveFlatObjectType(
   schema: ApiSchema,
   type: TypeSchema,
   seen: Set<string> = new Set(),
+  allowInlineObjectUnion = false,
 ):
   | {
       readonly fields: readonly FieldSchema[];
@@ -891,7 +1006,7 @@ function resolveFlatObjectType(
         return undefined;
       }
       seen.add(type.model);
-      const resolved = resolveFlatObjectType(schema, model.type, seen);
+      const resolved = resolveFlatObjectType(schema, model.type, seen, allowInlineObjectUnion);
       seen.delete(type.model);
       if (!resolved) {
         return undefined;
@@ -907,7 +1022,7 @@ function resolveFlatObjectType(
       let extra: TypeSchema | undefined;
       let modelSymbol: string | undefined;
       for (const member of type.members) {
-        const resolved = resolveFlatObjectType(schema, member, seen);
+        const resolved = resolveFlatObjectType(schema, member, seen, allowInlineObjectUnion);
         if (!resolved) {
           return undefined;
         }
@@ -922,6 +1037,62 @@ function resolveFlatObjectType(
         }
       }
       return { fields: Array.from(byName.values()), extra, modelSymbol };
+    }
+    case 'union': {
+      if (
+        !allowInlineObjectUnion ||
+        type.members.length === 0 ||
+        !type.members.some((m) => m.kind === 'object' || m.kind === 'intersection')
+      ) {
+        return undefined;
+      }
+      const branchObjects: { fields: readonly FieldSchema[]; extra: TypeSchema | undefined }[] = [];
+      for (const member of type.members) {
+        const resolved = resolveFlatObjectType(schema, member, seen, allowInlineObjectUnion);
+        if (!resolved) {
+          return undefined;
+        }
+        branchObjects.push(resolved);
+      }
+      const fieldBranches = new Map<
+        string,
+        { field: FieldSchema; count: number; types: TypeSchema[]; typeKeys: Set<string> }
+      >();
+      for (const branch of branchObjects) {
+        for (const f of branch.fields) {
+          const tk = formatTypeExpr(f.type, 'top', schema);
+          const existing = fieldBranches.get(f.name);
+          if (!existing) {
+            fieldBranches.set(f.name, {
+              field: f,
+              count: 1,
+              types: [f.type],
+              typeKeys: new Set([tk]),
+            });
+          } else {
+            existing.count++;
+            if (!f.required) {
+              existing.field = { ...existing.field, required: false };
+            }
+            if (!existing.typeKeys.has(tk)) {
+              existing.typeKeys.add(tk);
+              existing.types.push(f.type);
+            }
+          }
+        }
+      }
+      const mergedFields: FieldSchema[] = [];
+      for (const entry of fieldBranches.values()) {
+        const isReq = entry.count === branchObjects.length && entry.field.required;
+        const mergedType: TypeSchema =
+          entry.types.length === 1 ? entry.types[0]! : { kind: 'union', members: entry.types };
+        mergedFields.push({
+          ...entry.field,
+          required: isReq,
+          type: mergedType,
+        });
+      }
+      return { fields: mergedFields, extra: undefined, modelSymbol: undefined };
     }
     default:
       return undefined;
@@ -997,10 +1168,6 @@ function validateObjectFields(
       }
       continue;
     }
-    if (extra) {
-      validateValue(schema, extra, propVal, `${path}.${key}`, issues, currentModelSymbol, seenModels);
-      continue;
-    }
     const wireMatch = byWireName.get(key);
     if (wireMatch && !wireMatch.readonly) {
       issues.push({
@@ -1009,6 +1176,10 @@ function validateObjectFields(
         message: `Object literal may only specify known properties, but '${key}' does not exist in type '${typeLabel}'. Did you mean '${wireMatch.name}' (the SDK's camelCase name for wire field '${wireMatch.wireName}')?`,
         symbol: currentModelSymbol,
       });
+      continue;
+    }
+    if (extra) {
+      validateValue(schema, extra, propVal, `${path}.${key}`, issues, currentModelSymbol, seenModels);
       continue;
     }
     const writableNames = fields.filter((f) => !f.readonly).map((f) => f.name);
@@ -1158,27 +1329,47 @@ export function validateMethodCall(schema: ApiSchema, method: MethodSchema, args
   }
 
   if (issues.length > 0) {
-    const popups: string[] = [hover(schema, method.path)];
+    const definitions: string[] = [types(schema, method.path)];
     const shownModels = new Set<string>();
     for (const issue of issues) {
       if (issue.symbol && !shownModels.has(issue.symbol) && schema.models[issue.symbol]) {
         shownModels.add(issue.symbol);
-        popups.push(hover(schema, issue.symbol));
+        definitions.push(types(schema, issue.symbol));
       }
     }
-    throw new TypeFeedbackError(issues, popups.join('\n\n'));
+    throw new TypeFeedbackError(issues, definitions.join('\n\n'));
   }
+}
+
+const SYMBOL_PATH = Symbol.for('forge.mcp.symbolPath');
+
+function getSymbolPath(value: unknown): string | undefined {
+  if ((typeof value === 'object' || typeof value === 'function') && value !== null && SYMBOL_PATH in value) {
+    const sym = Reflect.get(value, SYMBOL_PATH);
+    return typeof sym === 'string' ? sym : undefined;
+  }
+  return undefined;
 }
 
 /**
  * Wraps a generated Forge SDK `Client` in a progressive type-feedback `Proxy`.
  * Unknown property accesses and invalid method arguments throw a `TypeFeedbackError`
- * with compiler diagnostics and the relevant `.d.ts` type popup BEFORE any HTTP request is made.
+ * with compiler diagnostics and the relevant `.d.ts` type definition BEFORE any HTTP request is made.
+ * Returning an uninvoked namespace, method, or model from `execute()` inspects its 1-level `.d.ts` signature.
  */
 export function wrapClient<T extends object>(client: T, schema: ApiSchema, groupPath = ''): T {
   const cache = new Map<string | symbol, unknown>();
   return new Proxy(client, {
+    has(target, prop) {
+      if (prop === SYMBOL_PATH) {
+        return true;
+      }
+      return Reflect.has(target, prop);
+    },
     get(target, prop, receiver) {
+      if (prop === SYMBOL_PATH) {
+        return groupPath;
+      }
       if (typeof prop === 'symbol' || prop === 'then' || prop === 'toJSON') {
         return Reflect.get(target, prop, receiver);
       }
@@ -1191,8 +1382,14 @@ export function wrapClient<T extends object>(client: T, schema: ApiSchema, group
       const isChildGroup =
         groupPath === '' ? schema.rootChildren.includes(prop) : (group?.children.includes(prop) ?? false);
       const methodSchema = group?.methods.find((m) => m.name === prop);
+      const modelSchema = schema.models[fullPath];
 
       if (!isChildGroup && !methodSchema) {
+        if (modelSchema) {
+          const modelHandle = Object.freeze({ [SYMBOL_PATH]: fullPath });
+          cache.set(prop, modelHandle);
+          return modelHandle;
+        }
         const available =
           groupPath === ''
             ? schema.rootChildren
@@ -1201,12 +1398,16 @@ export function wrapClient<T extends object>(client: T, schema: ApiSchema, group
           .map((name) => ({ name, dist: editDistance(prop, name) }))
           .sort((a, b) => a.dist - b.dist)[0];
         const ownerType = groupPath === '' ? 'Client' : `${groupPath}.Client`;
-        const hint =
-          closest && closest.dist <= 3
+        const lowerSuffix = `.${fullPath.toLowerCase()}`;
+        const suffixGroup = Object.keys(schema.groups).find((g) => g.toLowerCase().endsWith(lowerSuffix));
+        const hint = suffixGroup
+          ? ` Did you mean 'client.${suffixGroup}'?`
+          : closest && closest.dist <= 3
             ? ` Did you mean '${closest.name}'?`
             : available.length > 0
               ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
               : '';
+        const defTarget = suffixGroup ?? groupPath;
         throw new TypeFeedbackError(
           [
             {
@@ -1215,7 +1416,7 @@ export function wrapClient<T extends object>(client: T, schema: ApiSchema, group
               message: `Property '${prop}' does not exist on type '${ownerType}'.${hint}`,
             },
           ],
-          hover(schema, groupPath),
+          types(schema, defTarget),
         );
       }
 
@@ -1225,10 +1426,19 @@ export function wrapClient<T extends object>(client: T, schema: ApiSchema, group
           validateMethodCall(schema, methodSchema, args);
           return (rawValue as (...callArgs: unknown[]) => unknown).apply(target, args);
         };
+        Object.defineProperty(wrappedFn, SYMBOL_PATH, { value: fullPath });
         if (isChildGroup) {
           const childProxy = wrapClient(rawValue as object, schema, fullPath);
           const hybrid = new Proxy(wrappedFn, {
-            get(_fnTarget, childProp, _fnReceiver) {
+            has(fnTarget, childProp) {
+              return (
+                childProp === SYMBOL_PATH || Reflect.has(childProxy, childProp) || Reflect.has(fnTarget, childProp)
+              );
+            },
+            get(_fnTarget, childProp) {
+              if (childProp === SYMBOL_PATH) {
+                return fullPath;
+              }
               return Reflect.get(childProxy, childProp, childProxy);
             },
           });
@@ -1254,12 +1464,13 @@ export type ExecuteResult =
   | {
       readonly ok: true;
       readonly result: unknown;
+      readonly typeDefinition?: string;
     }
   | {
       readonly ok: false;
       readonly error: string;
       readonly issues?: readonly ValidationIssue[];
-      readonly typePopup?: string;
+      readonly typeDefinition?: string;
     };
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
@@ -1284,23 +1495,30 @@ function prepareCodeBody(code: string): string {
 
 /**
  * Executes an agent callback or JavaScript snippet against the type-checked Forge SDK `client`.
- * When a `TypeFeedbackError` occurs, returns `{ ok: false, error, issues, typePopup }` so the
- * agent receives the exact compiler-style error and `.d.ts` popup in a single turn.
+ * - If the snippet returns an uninvoked SDK namespace, method, or model (e.g. `client.dns.records` or `client.dns.records.create`),
+ *   returns its 1-level `.d.ts` TypeScript definition.
+ * - When a `TypeFeedbackError` occurs, returns `{ ok: false, error, issues, typeDefinition }` so the
+ *   agent receives the exact compiler-style error and `.d.ts` definition in a single turn.
  */
 export async function execute<T extends object>(
   client: T,
   schema: ApiSchema,
-  codeOrFn: string | ((client: T, hoverSymbol: (symbol?: string) => string) => unknown | Promise<unknown>),
+  codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
 ): Promise<ExecuteResult> {
   const checkedClient = wrapClient(client, schema);
-  const hoverSymbol = (symbol?: string) => hover(schema, symbol);
+  const typesFn = (symbol?: string) => types(schema, symbol);
   try {
     let value: unknown;
     if (typeof codeOrFn === 'function') {
-      value = await codeOrFn(checkedClient, hoverSymbol);
+      value = await codeOrFn(checkedClient, typesFn);
     } else {
-      const runner = new AsyncFunction('client', 'hover', prepareCodeBody(codeOrFn));
-      value = await runner(checkedClient, hoverSymbol);
+      const runner = new AsyncFunction('client', 'types', prepareCodeBody(codeOrFn));
+      value = await runner(checkedClient, typesFn);
+    }
+    const inspectedSymbol = getSymbolPath(value);
+    if (inspectedSymbol !== undefined) {
+      const def = types(schema, inspectedSymbol);
+      return { ok: true, result: def, typeDefinition: def };
     }
     return { ok: true, result: value };
   } catch (err) {
@@ -1309,7 +1527,7 @@ export async function execute<T extends object>(
         ok: false,
         error: err.message,
         issues: err.issues,
-        typePopup: err.typePopup,
+        typeDefinition: err.typeDefinition,
       };
     }
     return {
@@ -1322,13 +1540,13 @@ export async function execute<T extends object>(
 export interface ProgressiveMcp<T extends object> {
   readonly schema: ApiSchema;
   readonly client: T;
-  hover(symbol?: string): string;
+  types(symbol?: string): string;
   execute(
-    codeOrFn: string | ((client: T, hoverSymbol: (symbol?: string) => string) => unknown | Promise<unknown>),
+    codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
   ): Promise<ExecuteResult>;
   readonly tools: readonly [
     {
-      readonly name: 'hover';
+      readonly name: 'types';
       readonly description: string;
       readonly inputSchema: {
         readonly type: 'object';
@@ -1367,35 +1585,35 @@ export function createProgressiveMcp<T extends object>(client: T, schema: ApiSch
   return {
     schema,
     client: checkedClient,
-    hover(symbol?: string): string {
-      return hover(schema, symbol);
+    types(symbol?: string): string {
+      return types(schema, symbol);
     },
     execute(codeOrFn): Promise<ExecuteResult> {
       return execute(client, schema, codeOrFn);
     },
     tools: [
       {
-        name: 'hover',
+        name: 'types',
         description:
-          'Inspect 1-level TypeScript (.d.ts) definitions and JSDoc for any SDK namespace, method, or model (e.g. "", "dns", "dns.records", "dns.records.create", "dns.records.RecordSettings"). Nested models stay nominal until hovered.',
+          'Inspect 1-level TypeScript (.d.ts) definitions and JSDoc for any SDK namespace, method, or model (e.g. "dns.records", "dns.records.create", "d1", "queues.messages", "r2.buckets"). Nested models stay nominal until inspected.',
         inputSchema: {
           type: 'object',
           properties: {
             symbol: {
               type: 'string',
               description:
-                'Dot-separated symbol path in the generated TypeScript SDK (omit or pass "client" for the top-level namespace index).',
+                'Dot-separated symbol path in the generated TypeScript SDK (e.g. "dns.records", "dns.records.create", or omit for top-level index).',
             },
           },
         },
         handler(args?: { readonly symbol?: string }): string {
-          return hover(schema, args?.symbol);
+          return types(schema, args?.symbol);
         },
       },
       {
         name: 'execute',
         description:
-          'Execute TypeScript/JavaScript against the generated `client` SDK instance. Validates namespaces, method names, and request types before making any HTTP call, auto-attaching 1-level .d.ts type popups on any error.',
+          'Execute TypeScript/JavaScript against the generated `client` SDK instance. Returning `client.<group>` or `client.<group>.<method>` inspects its .d.ts types; calling `await client.<group>.<method>(...)` validates arguments before making any HTTP call and returns compiler diagnostics + 1-level .d.ts definitions on any type error.',
         inputSchema: {
           type: 'object',
           required: ['code'],

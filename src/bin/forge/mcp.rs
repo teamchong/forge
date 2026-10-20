@@ -3,9 +3,10 @@
 //!
 //! Instead of dumping thousands of flattened tool schemas into the prompt or
 //! searching raw OpenAPI JSON paths, agents inspect the SDK's hierarchical
-//! TypeScript definitions one level at a time with `hover(symbol)` and execute
+//! TypeScript definitions one level at a time with `types(symbol)` (or by
+//! evaluating `client.<group>.<method>` inside `execute(code)`) and execute
 //! typed SDK code with `execute(code)`, receiving compiler-style diagnostics
-//! with the relevant `.d.ts` popup attached on any type or property mistake.
+//! with the relevant `.d.ts` type definition attached on any mistake.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -52,7 +53,7 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let api_schema_ty = mcp_mod.ident("ApiSchema").ty();
     let create_progressive = mcp_mod.ident("createProgressiveMcp");
     let execute_fn = mcp_mod.ident("execute");
-    let hover_fn = mcp_mod.ident("hover");
+    let types_fn = mcp_mod.ident("types");
     let progressive_ty = mcp_mod.ident("ProgressiveMcp").ty();
     let type_err = mcp_mod.ident("TypeFeedbackError");
 
@@ -63,7 +64,7 @@ fn mcp_entry_file(schema_json: &str) -> File {
         ", ",
         execute_fn,
         ", ",
-        hover_fn,
+        types_fn,
         ", ",
         type_err,
         " };"
@@ -81,7 +82,7 @@ fn mcp_entry_file(schema_json: &str) -> File {
         " };"
     );
     p!(f);
-    f.doc("Progressive 1-level TypeScript schema metadata for hover and runtime type-feedback.");
+    f.doc("Progressive 1-level TypeScript schema metadata for type inspection and runtime type-feedback.");
     p!(f, "export const schema: ", api_schema_ty, " = ", schema_json, ";");
     p!(f);
     f.doc("Creates a Progressive Type-Feedback MCP interface for the generated SDK.");
