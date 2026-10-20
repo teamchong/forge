@@ -150,7 +150,7 @@ pub(super) fn has_fields(t: Type<'_>) -> bool {
 /// Reports whether the SDK keeps a property: its name is valid
 /// (specs/02-naming.md). An object that leaves out a property allows other
 /// keys.
-pub(super) fn kept(field: Field<'_>) -> bool {
+pub(crate) fn kept(field: Field<'_>) -> bool {
     valid_name(field.wire_name())
 }
 
@@ -183,7 +183,7 @@ pub(super) fn all_optional(t: Type<'_>) -> bool {
 
 /// Prefixes `s` with `_` if it starts with a digit, so it's a valid
 /// identifier.
-pub(super) fn identifier(s: String) -> String {
+pub(crate) fn identifier(s: String) -> String {
     if s.starts_with(|c: char| c.is_ascii_digit()) {
         format!("_{s}")
     } else {

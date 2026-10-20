@@ -9,12 +9,12 @@ use std::borrow::Cow;
 use forge::ts::{self, Ident, Module, PREAMBLE};
 use forge::{Err, Forge, Group, Method, Model, Plugin};
 
-mod client;
+pub(crate) mod client;
 mod codec;
 mod index;
 mod models;
 mod operation;
-mod types;
+pub(crate) mod types;
 
 /// Generates a TypeScript SDK.
 pub struct Generator;

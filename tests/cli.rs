@@ -79,3 +79,26 @@ fn ts() {
     );
     std::fs::remove_dir_all(&out).unwrap();
 }
+
+#[test]
+fn mcp() {
+    let out = std::env::temp_dir().join(format!("forge-cli-mcp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let result = forge(&["-", "--target", "mcp", "--out", out.to_str().unwrap()], SPEC);
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    for name in [
+        "index.ts",
+        "client.ts",
+        "mcp.ts",
+        "_/mcp.ts",
+        "a/index.ts",
+        "a/client.ts",
+        "_/index.ts",
+    ] {
+        assert!(out.join(name).is_file(), "{name} is missing");
+    }
+    let mcp_entry = std::fs::read_to_string(out.join("mcp.ts")).unwrap();
+    assert!(mcp_entry.contains("export function createMcp("), "{mcp_entry}");
+    assert!(mcp_entry.contains("export const schema: ApiSchema ="), "{mcp_entry}");
+    std::fs::remove_dir_all(&out).unwrap();
+}
