@@ -66,6 +66,8 @@ export interface MethodSchema {
   readonly responseTypeName: string;
   readonly responseType?: TypeSchema | undefined;
   readonly responseOptional?: boolean | undefined;
+  readonly permissions?: readonly string[] | undefined;
+  readonly extensions?: Readonly<Record<string, unknown>> | undefined;
 }
 
 export interface GroupSchema {
@@ -350,12 +352,13 @@ function renderFieldsBlock(
 }
 
 function renderMethodSignature(method: MethodSchema, indent = '  ', brief = false): string {
-  const docText = brief
-    ? firstSummaryLine(method.summary ?? method.description)
-    : [method.summary, method.description]
-        .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
-        .filter((s, idx, arr) => idx === 0 || s !== arr[0])
-        .join('\n\n');
+  const parts = [method.summary, method.description]
+    .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
+    .filter((s, idx, arr) => idx === 0 || s !== arr[0]);
+  if (!brief && method.permissions && method.permissions.length > 0) {
+    parts.push(`Permissions: ${method.permissions.join(', ')}`);
+  }
+  const docText = brief ? firstSummaryLine(method.summary ?? method.description) : parts.join('\n\n');
   const doc = formatJsDoc(docText, method.deprecated, indent);
   const reqParam = method.requestTypeName
     ? `request${method.requestOptional ? '?' : ''}: ${method.requestTypeName}, options?: RequestOptions`
@@ -1357,7 +1360,87 @@ function getSymbolPath(value: unknown): string | undefined {
  * with compiler diagnostics and the relevant `.d.ts` type definition BEFORE any HTTP request is made.
  * Returning an uninvoked namespace, method, or model from `execute()` inspects its 1-level `.d.ts` signature.
  */
-export function wrapClient<T extends object>(client: T, schema: ApiSchema, groupPath = ''): T {
+export interface ExecuteOptions {
+  /**
+   * Default account ID for the session (e.g. auto-resolved from a single-account token
+   * or passed via the `account_id` tool argument). Automatically injected into methods
+   * that require `accountId` when omitted by the caller.
+   */
+  readonly accountId?: string | undefined;
+  /**
+   * Message returned when an account-scoped endpoint is called without `accountId`
+   * and the session has multiple accounts (`accountId` is undefined).
+   */
+  readonly unresolvedAccountMessage?: string | undefined;
+  /**
+   * Override base URL when building requests in `plan()`.
+   */
+  readonly baseUrl?: string | undefined;
+}
+
+class NeedsAccountError extends Error {
+  readonly methodPath: string;
+  constructor(message: string, methodPath: string) {
+    super(message);
+    this.name = 'NeedsAccountError';
+    this.methodPath = methodPath;
+  }
+}
+
+interface CallLogEntry {
+  readonly methodSchema: MethodSchema;
+  status?: number | undefined;
+}
+
+interface WrapContext {
+  readonly options?: ExecuteOptions | undefined;
+  readonly callLog?: CallLogEntry[] | undefined;
+  readonly onPlanRequest?: ((method: MethodSchema, reqArg: unknown) => never) | undefined;
+}
+
+function resolveAccountArgs(
+  methodSchema: MethodSchema,
+  args: unknown[],
+  options?: ExecuteOptions | undefined,
+): unknown[] {
+  const needsAccountParam = methodSchema.requestParams.some((p) => p.name === 'accountId' && p.required);
+  if (!needsAccountParam) {
+    return args;
+  }
+  const first = args[0];
+  const hasAccountProp =
+    isPlainRecord(first) &&
+    ((typeof first['accountId'] === 'string' && first['accountId'] !== '') ||
+      (typeof first['account_id'] === 'string' && first['account_id'] !== ''));
+  if (hasAccountProp) {
+    return args;
+  }
+  if (options?.accountId !== undefined && options.accountId !== '') {
+    const nextFirst = isPlainRecord(first)
+      ? { accountId: options.accountId, ...first }
+      : first === undefined
+        ? { accountId: options.accountId }
+        : first;
+    return [nextFirst, ...args.slice(1)];
+  }
+  if (options?.unresolvedAccountMessage !== undefined) {
+    throw new NeedsAccountError(options.unresolvedAccountMessage, methodSchema.path);
+  }
+  return args;
+}
+
+/**
+ * Wraps a generated Forge SDK `Client` in a progressive type-feedback `Proxy`.
+ * Unknown property accesses and invalid method arguments throw a `TypeFeedbackError`
+ * with compiler diagnostics and the relevant `.d.ts` type definition BEFORE any HTTP request is made.
+ * Returning an uninvoked namespace, method, or model from `execute()` inspects its 1-level `.d.ts` signature.
+ */
+export function wrapClient<T extends object>(
+  client: T,
+  schema: ApiSchema,
+  groupPath = '',
+  ctx?: WrapContext | undefined,
+): T {
   const cache = new Map<string | symbol, unknown>();
   return new Proxy(client, {
     has(target, prop) {
@@ -1421,14 +1504,37 @@ export function wrapClient<T extends object>(client: T, schema: ApiSchema, group
       }
 
       const rawValue: unknown = Reflect.get(target, prop, receiver);
-      if (methodSchema && typeof rawValue === 'function') {
+      if (methodSchema && (typeof rawValue === 'function' || ctx?.onPlanRequest !== undefined)) {
         const wrappedFn = (...args: unknown[]) => {
-          validateMethodCall(schema, methodSchema, args);
-          return (rawValue as (...callArgs: unknown[]) => unknown).apply(target, args);
+          const effectiveArgs = resolveAccountArgs(methodSchema, args, ctx?.options);
+          validateMethodCall(schema, methodSchema, effectiveArgs);
+          if (ctx?.onPlanRequest) {
+            return ctx.onPlanRequest(methodSchema, effectiveArgs[0]);
+          }
+          const logEntry: CallLogEntry = { methodSchema };
+          ctx?.callLog?.push(logEntry);
+          const res = (rawValue as (...callArgs: unknown[]) => unknown).apply(target, effectiveArgs);
+          if (res instanceof Promise) {
+            return res.then(
+              (val) => {
+                logEntry.status = 200;
+                return val;
+              },
+              (err: unknown) => {
+                if (typeof err === 'object' && err !== null && 'status' in err && typeof err.status === 'number') {
+                  logEntry.status = err.status;
+                }
+                throw err;
+              },
+            );
+          }
+          logEntry.status = 200;
+          return res;
         };
         Object.defineProperty(wrappedFn, SYMBOL_PATH, { value: fullPath });
         if (isChildGroup) {
-          const childProxy = wrapClient(rawValue as object, schema, fullPath);
+          const childTarget = typeof rawValue === 'object' && rawValue !== null ? rawValue : {};
+          const childProxy = wrapClient(childTarget, schema, fullPath, ctx);
           const hybrid = new Proxy(wrappedFn, {
             has(fnTarget, childProp) {
               return (
@@ -1449,8 +1555,10 @@ export function wrapClient<T extends object>(client: T, schema: ApiSchema, group
         return wrappedFn;
       }
 
-      if (isChildGroup && (typeof rawValue === 'object' || typeof rawValue === 'function') && rawValue !== null) {
-        const wrappedGroup = wrapClient(rawValue, schema, fullPath);
+      if (isChildGroup) {
+        const childTarget =
+          (typeof rawValue === 'object' || typeof rawValue === 'function') && rawValue !== null ? rawValue : {};
+        const wrappedGroup = wrapClient(childTarget, schema, fullPath, ctx);
         cache.set(prop, wrappedGroup);
         return wrappedGroup;
       }
@@ -1464,13 +1572,42 @@ export type ExecuteResult =
   | {
       readonly ok: true;
       readonly result: unknown;
-      readonly typeDefinition?: string;
+      readonly typeDefinition?: string | undefined;
     }
   | {
       readonly ok: false;
       readonly error: string;
-      readonly issues?: readonly ValidationIssue[];
-      readonly typeDefinition?: string;
+      readonly issues?: readonly ValidationIssue[] | undefined;
+      readonly typeDefinition?: string | undefined;
+      readonly status?: number | undefined;
+      readonly missingScope?: string | undefined;
+      readonly permissions?: readonly string[] | undefined;
+      readonly replaySafe?: boolean | undefined;
+      readonly needsAccount?: boolean | undefined;
+    };
+
+export type CallPlan =
+  | {
+      readonly kind: 'request';
+      readonly method: string;
+      readonly url: string;
+      readonly route: string;
+      readonly methodPath: string;
+      readonly headers: Record<string, string>;
+      readonly body?: string | undefined;
+      readonly permissions?: readonly string[] | undefined;
+      readonly accountId?: string | undefined;
+    }
+  | {
+      readonly kind: 'needs_account';
+      readonly message: string;
+      readonly methodPath: string;
+    }
+  | {
+      readonly kind: 'invalid';
+      readonly error: string;
+      readonly issues?: readonly ValidationIssue[] | undefined;
+      readonly typeDefinition?: string | undefined;
     };
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
@@ -1493,19 +1630,32 @@ function prepareCodeBody(code: string): string {
   return trimmed;
 }
 
+function isCallLogReplaySafe(callLog: readonly CallLogEntry[]): boolean {
+  return callLog.every(
+    (entry) =>
+      entry.methodSchema.httpMethod === 'GET' ||
+      entry.methodSchema.httpMethod === 'HEAD' ||
+      entry.status === 401 ||
+      entry.status === 403,
+  );
+}
+
 /**
  * Executes an agent callback or JavaScript snippet against the type-checked Forge SDK `client`.
  * - If the snippet returns an uninvoked SDK namespace, method, or model (e.g. `client.dns.records` or `client.dns.records.create`),
  *   returns its 1-level `.d.ts` TypeScript definition.
- * - When a `TypeFeedbackError` occurs, returns `{ ok: false, error, issues, typeDefinition }` so the
+ * - When a `TypeFeedbackError` occurs, returns `{ ok: false, error, issues, typeDefinition, replaySafe: true }` so the
  *   agent receives the exact compiler-style error and `.d.ts` definition in a single turn.
+ * - When an HTTP 401/403 refusal occurs, surfaces `status`, `missingScope`, `permissions` (from `x-api-token-group`), and `replaySafe`.
  */
 export async function execute<T extends object>(
   client: T,
   schema: ApiSchema,
   codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+  options?: ExecuteOptions | undefined,
 ): Promise<ExecuteResult> {
-  const checkedClient = wrapClient(client, schema);
+  const callLog: CallLogEntry[] = [];
+  const checkedClient = wrapClient(client, schema, '', { options, callLog });
   const typesFn = (symbol?: string) => types(schema, symbol);
   try {
     let value: unknown;
@@ -1522,16 +1672,233 @@ export async function execute<T extends object>(
     }
     return { ok: true, result: value };
   } catch (err) {
+    const replaySafe = isCallLogReplaySafe(callLog);
     if (err instanceof TypeFeedbackError) {
       return {
         ok: false,
         error: err.message,
         issues: err.issues,
         typeDefinition: err.typeDefinition,
+        replaySafe,
       };
+    }
+    if (err instanceof NeedsAccountError) {
+      return {
+        ok: false,
+        error: err.message,
+        needsAccount: true,
+        replaySafe,
+      };
+    }
+    const lastCall = callLog[callLog.length - 1];
+    const status =
+      typeof err === 'object' && err !== null && 'status' in err && typeof err.status === 'number'
+        ? err.status
+        : undefined;
+    let missingScope =
+      typeof err === 'object' && err !== null && 'missingScope' in err && typeof err.missingScope === 'string'
+        ? err.missingScope
+        : undefined;
+    if (
+      missingScope === undefined &&
+      typeof err === 'object' &&
+      err !== null &&
+      'response' in err &&
+      err.response instanceof Response
+    ) {
+      missingScope = err.response.headers.get('x-mcp-missing-scope') ?? undefined;
     }
     return {
       ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      status,
+      missingScope,
+      permissions: lastCall?.methodSchema.permissions,
+      replaySafe,
+    };
+  }
+}
+
+function encodeWireValue(
+  schema: ApiSchema,
+  type: TypeSchema | undefined,
+  value: unknown,
+  seen = new Set<string>(),
+): unknown {
+  if (!type || value === null || value === undefined || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return type.kind === 'array' ? value.map((item) => encodeWireValue(schema, type.elem, item, seen)) : value;
+  }
+  if (type.kind === 'model') {
+    if (seen.has(type.model)) {
+      return value;
+    }
+    const model = schema.models[type.model];
+    if (!model) {
+      return value;
+    }
+    const nextSeen = new Set(seen);
+    nextSeen.add(type.model);
+    return encodeWireValue(schema, model.type, value, nextSeen);
+  }
+  if (type.kind === 'union') {
+    for (const member of type.members) {
+      const trial: ValidationIssue[] = [];
+      validateValue(schema, member, value, 'body', trial, undefined, new Set());
+      if (trial.length === 0) {
+        return encodeWireValue(schema, member, value, seen);
+      }
+    }
+  }
+  const flatObj = resolveFlatObjectType(schema, type, new Set(), true);
+  if (flatObj && isPlainRecord(value)) {
+    const byName = new Map<string, FieldSchema>();
+    for (const f of flatObj.fields) {
+      byName.set(f.name, f);
+    }
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (v === undefined) {
+        continue;
+      }
+      const field = byName.get(k);
+      if (field) {
+        out[field.wireName] = encodeWireValue(schema, field.type, v, seen);
+      } else {
+        out[k] = encodeWireValue(schema, flatObj.extra, v, seen);
+      }
+    }
+    return out;
+  }
+  return value;
+}
+
+class PlannedCallSignal {
+  readonly plan: CallPlan;
+  constructor(plan: CallPlan) {
+    this.plan = plan;
+  }
+}
+
+function buildCallPlan(
+  schema: ApiSchema,
+  method: MethodSchema,
+  reqArg: unknown,
+  options?: ExecuteOptions | undefined,
+): CallPlan {
+  const baseUrl = (options?.baseUrl ?? schema.baseUrl ?? 'https://api.cloudflare.com/client/v4').replace(/\/+$/, '');
+  const rec = isPlainRecord(reqArg) ? reqArg : {};
+  let resolvedPath = method.route;
+  const paramNames = new Set<string>();
+  let accountId: string | undefined;
+
+  for (const param of method.requestParams) {
+    paramNames.add(param.name);
+    const val = rec[param.name];
+    if (param.name === 'accountId' && typeof val === 'string') {
+      accountId = val;
+    }
+    if (param.location === 'path' && val !== undefined) {
+      resolvedPath = resolvedPath.replace(`{${param.name}}`, encodeURIComponent(String(val)));
+    }
+  }
+
+  const url = new URL(`${baseUrl}${resolvedPath.startsWith('/') ? '' : '/'}${resolvedPath}`);
+  for (const param of method.requestParams) {
+    if (param.location === 'query') {
+      const val = rec[param.name];
+      if (val !== undefined && val !== null) {
+        url.searchParams.set(param.wireName, String(val));
+      }
+    }
+  }
+
+  const headers: Record<string, string> = { accept: 'application/json' };
+  let bodyStr: string | undefined;
+  if (method.requestBody) {
+    let rawBody: unknown;
+    if (method.requestFlat) {
+      const bodyObj: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(rec)) {
+        if (!paramNames.has(k) && v !== undefined) {
+          bodyObj[k] = v;
+        }
+      }
+      rawBody = encodeWireValue(schema, method.requestBody.type, bodyObj);
+    } else {
+      rawBody = encodeWireValue(schema, method.requestBody.type, rec['body']);
+    }
+    if (rawBody !== undefined) {
+      headers['content-type'] = 'application/json';
+      bodyStr = JSON.stringify(rawBody);
+    }
+  }
+
+  return {
+    kind: 'request',
+    method: method.httpMethod,
+    url: url.toString(),
+    route: method.route,
+    methodPath: method.path,
+    headers,
+    body: bodyStr,
+    permissions: method.permissions,
+    accountId,
+  };
+}
+
+/**
+ * Plans an SDK call in a credential-free isolate without making any network request.
+ * Validates types, resolves `accountId`, encodes `camelCase` SDK properties into wire JSON,
+ * and returns the `CallPlan` (`request` with `permissions` from `x-api-token-group`, `needs_account`, or `invalid`).
+ */
+export async function plan<T extends object>(
+  client: T,
+  schema: ApiSchema,
+  codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+  options?: ExecuteOptions | undefined,
+): Promise<CallPlan> {
+  const checkedClient = wrapClient(client, schema, '', {
+    options,
+    onPlanRequest(methodSchema, reqArg) {
+      throw new PlannedCallSignal(buildCallPlan(schema, methodSchema, reqArg, options));
+    },
+  });
+  const typesFn = (symbol?: string) => types(schema, symbol);
+  try {
+    if (typeof codeOrFn === 'function') {
+      await codeOrFn(checkedClient, typesFn);
+    } else {
+      const runner = new AsyncFunction('client', 'types', prepareCodeBody(codeOrFn));
+      await runner(checkedClient, typesFn);
+    }
+    return {
+      kind: 'invalid',
+      error: 'Code did not invoke any SDK method on `client`.',
+    };
+  } catch (err) {
+    if (err instanceof PlannedCallSignal) {
+      return err.plan;
+    }
+    if (err instanceof NeedsAccountError) {
+      return {
+        kind: 'needs_account',
+        message: err.message,
+        methodPath: err.methodPath,
+      };
+    }
+    if (err instanceof TypeFeedbackError) {
+      return {
+        kind: 'invalid',
+        error: err.message,
+        issues: err.issues,
+        typeDefinition: err.typeDefinition,
+      };
+    }
+    return {
+      kind: 'invalid',
       error: err instanceof Error ? err.message : String(err),
     };
   }
@@ -1543,7 +1910,12 @@ export interface ProgressiveMcp<T extends object> {
   types(symbol?: string): string;
   execute(
     codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+    options?: ExecuteOptions | undefined,
   ): Promise<ExecuteResult>;
+  plan(
+    codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+    options?: ExecuteOptions | undefined,
+  ): Promise<CallPlan>;
   readonly tools: readonly [
     {
       readonly name: 'types';
@@ -1570,9 +1942,13 @@ export interface ProgressiveMcp<T extends object> {
             readonly type: 'string';
             readonly description: string;
           };
+          readonly account_id: {
+            readonly type: 'string';
+            readonly description: string;
+          };
         };
       };
-      handler(args: { readonly code: string }): Promise<ExecuteResult>;
+      handler(args: { readonly code: string; readonly account_id?: string | undefined }): Promise<ExecuteResult>;
     },
   ];
 }
@@ -1580,16 +1956,23 @@ export interface ProgressiveMcp<T extends object> {
 /**
  * Creates a progressive Type-Feedback MCP interface over a generated Forge SDK `client`.
  */
-export function createProgressiveMcp<T extends object>(client: T, schema: ApiSchema): ProgressiveMcp<T> {
-  const checkedClient = wrapClient(client, schema);
+export function createProgressiveMcp<T extends object>(
+  client: T,
+  schema: ApiSchema,
+  defaultOptions?: ExecuteOptions | undefined,
+): ProgressiveMcp<T> {
+  const checkedClient = wrapClient(client, schema, '', { options: defaultOptions });
   return {
     schema,
     client: checkedClient,
     types(symbol?: string): string {
       return types(schema, symbol);
     },
-    execute(codeOrFn): Promise<ExecuteResult> {
-      return execute(client, schema, codeOrFn);
+    execute(codeOrFn, options): Promise<ExecuteResult> {
+      return execute(client, schema, codeOrFn, options ?? defaultOptions);
+    },
+    plan(codeOrFn, options): Promise<CallPlan> {
+      return plan(client, schema, codeOrFn, options ?? defaultOptions);
     },
     tools: [
       {
@@ -1623,10 +2006,17 @@ export function createProgressiveMcp<T extends object>(client: T, schema: ApiSch
               description:
                 'JavaScript expression or async function body using `client` (e.g. `await client.dns.records.list({ zoneId: "..." })`).',
             },
+            account_id: {
+              type: 'string',
+              description:
+                'Optional Cloudflare account ID. Automatically injected into account-scoped SDK calls when omitted in `code`.',
+            },
           },
         },
-        handler(args: { readonly code: string }): Promise<ExecuteResult> {
-          return execute(client, schema, args.code);
+        handler(args: { readonly code: string; readonly account_id?: string | undefined }): Promise<ExecuteResult> {
+          const opts: ExecuteOptions | undefined =
+            args.account_id !== undefined ? { ...defaultOptions, accountId: args.account_id } : defaultOptions;
+          return execute(client, schema, args.code, opts);
         },
       },
     ],

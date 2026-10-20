@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use forge::ts::{File, Module, PREAMBLE, p};
 use forge::{
-    Discriminator, EnumValue, Err, Field, Forge, Group, Location, Method, Model, Object, Plugin, Scalar, Type, Union,
+    Discriminator, EnumValue, Err, Field, Forge, Group, Json, Location, Method, Model, Object, Plugin, Scalar, Type,
+    Union,
 };
 use serde::Serialize;
 
@@ -53,6 +54,7 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let api_schema_ty = mcp_mod.ident("ApiSchema").ty();
     let create_progressive = mcp_mod.ident("createProgressiveMcp");
     let execute_fn = mcp_mod.ident("execute");
+    let plan_fn = mcp_mod.ident("plan");
     let types_fn = mcp_mod.ident("types");
     let progressive_ty = mcp_mod.ident("ProgressiveMcp").ty();
     let type_err = mcp_mod.ident("TypeFeedbackError");
@@ -64,6 +66,8 @@ fn mcp_entry_file(schema_json: &str) -> File {
         ", ",
         execute_fn,
         ", ",
+        plan_fn,
+        ", ",
         types_fn,
         ", ",
         type_err,
@@ -73,6 +77,10 @@ fn mcp_entry_file(schema_json: &str) -> File {
         f,
         "export type { ",
         api_schema_ty,
+        ", ",
+        mcp_mod.ident("CallPlan").ty(),
+        ", ",
+        mcp_mod.ident("ExecuteOptions").ty(),
         ", ",
         mcp_mod.ident("ExecuteResult").ty(),
         ", ",
@@ -166,6 +174,10 @@ struct MethodSchema {
     response_type: Option<TypeSchema>,
     #[serde(skip_serializing_if = "is_false")]
     response_optional: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    permissions: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    extensions: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -427,6 +439,23 @@ fn build_method_schema(m: Method<'_>, group_path: &str, group_names: &HashMap<St
         }),
     };
 
+    let mut permissions = Vec::new();
+    if let Some(ext) = m.extension("x-api-token-group") {
+        if let Some(items) = ext.as_array() {
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    permissions.push(s.to_owned());
+                }
+            }
+        } else if let Some(s) = ext.as_str() {
+            permissions.push(s.to_owned());
+        }
+    }
+    let mut extensions = BTreeMap::new();
+    for (k, v) in m.extensions() {
+        extensions.insert(k.to_owned(), json_to_serde(v));
+    }
+
     MethodSchema {
         name,
         path,
@@ -443,6 +472,30 @@ fn build_method_schema(m: Method<'_>, group_path: &str, group_names: &HashMap<St
         response_type_name,
         response_type,
         response_optional,
+        permissions,
+        extensions,
+    }
+}
+
+fn json_to_serde(val: &Json) -> serde_json::Value {
+    if val.is_null() {
+        serde_json::Value::Null
+    } else if let Some(b) = val.as_bool() {
+        serde_json::Value::Bool(b)
+    } else if let Some(n) = val.as_f64() {
+        serde_json::Number::from_f64(n).map_or(serde_json::Value::Null, serde_json::Value::Number)
+    } else if let Some(s) = val.as_str() {
+        serde_json::Value::String(s.to_owned())
+    } else if let Some(arr) = val.as_array() {
+        serde_json::Value::Array(arr.iter().map(json_to_serde).collect())
+    } else if let Some(obj) = val.as_object() {
+        let mut map = serde_json::Map::with_capacity(obj.len());
+        for (k, v) in obj {
+            map.insert(k.clone(), json_to_serde(v));
+        }
+        serde_json::Value::Object(map)
+    } else {
+        serde_json::Value::Null
     }
 }
 
@@ -576,6 +629,7 @@ mod tests {
                      "post": {
                          "x-fern-sdk-group-name": ["dns", "records"],
                          "x-fern-sdk-method-name": "create",
+                         "x-api-token-group": ["DNS Write", "Zone Read"],
                          "summary": "Create DNS Record",
                          "parameters": [
                              {
@@ -644,6 +698,7 @@ mod tests {
         assert_eq!(records.methods[0].name, "create");
         assert_eq!(records.methods[0].path, "dns.records.create");
         assert!(records.methods[0].request_flat);
+        assert_eq!(records.methods[0].permissions, vec!["DNS Write", "Zone Read"]);
         assert!(schema.models.contains_key("dns.records.RecordSettings"));
 
         let files = forge::run(&forge, &Generator).unwrap();
