@@ -705,6 +705,13 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.match(dts, /export interface CreateRequest \{[\s\S]*accountId: string;[\s\S]*sessionDuration\?: string;/);
     assert.doesNotMatch(dts, /export interface AppRequest \{/);
 
+    const okRes = await execute(
+      { apps: { async create(req: unknown) { return req; } } },
+      unionSchema,
+      'return await client.apps.create({ accountId: "a1", name: "app", sessionDuration: "24h" })',
+    );
+    assert.equal(okRes.ok, true);
+
     const errRes = await execute(
       { apps: { async create() {} } },
       unionSchema,

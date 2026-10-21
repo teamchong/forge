@@ -1596,7 +1596,7 @@ export function validateMethodCall(schema: ApiSchema, method: MethodSchema, args
           new Set(),
         );
       } else if (method.requestFlat) {
-        const flatObj = resolveFlatObjectType(schema, body.type);
+        const flatObj = resolveFlatObjectType(schema, body.type, new Set(), true);
         if (flatObj) {
           const byName = new Map<string, FieldSchema>();
           for (const f of flatObj.fields) {
