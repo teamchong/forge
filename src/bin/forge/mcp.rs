@@ -55,6 +55,7 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let create_progressive = mcp_mod.ident("createProgressiveMcp");
     let execute_fn = mcp_mod.ident("execute");
     let plan_fn = mcp_mod.ident("plan");
+    let search_fn = mcp_mod.ident("search");
     let types_fn = mcp_mod.ident("types");
     let list_resources_fn = mcp_mod.ident("listResources");
     let list_templates_fn = mcp_mod.ident("listResourceTemplates");
@@ -70,6 +71,8 @@ fn mcp_entry_file(schema_json: &str) -> File {
         execute_fn,
         ", ",
         plan_fn,
+        ", ",
+        search_fn,
         ", ",
         types_fn,
         ", ",

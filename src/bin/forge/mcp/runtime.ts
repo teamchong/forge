@@ -522,15 +522,90 @@ function findSuggestions(schema: ApiSchema, query: string, limit = 5): string[] 
     .map((item) => item.candidate);
 }
 
+const QUERY_STOP_WORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'from',
+  'into',
+  'that',
+  'this',
+  'how',
+  'can',
+  'you',
+  'our',
+  'all',
+  'any',
+  'existing',
+  'new',
+  'using',
+]);
+
+function stemToken(word: string): string {
+  if (word.length <= 3) {
+    return word;
+  }
+  if (word.endsWith('ies') && word.length > 4) {
+    return `${word.slice(0, -3)}y`;
+  }
+  if (
+    word.endsWith('ches') ||
+    word.endsWith('shes') ||
+    word.endsWith('xes') ||
+    word.endsWith('zes') ||
+    word.endsWith('sses')
+  ) {
+    return word.slice(0, -2);
+  }
+  if (word.endsWith('ed') && word.length > 4) {
+    const base = word.slice(0, -2);
+    return base.endsWith('ch') || base.endsWith('sh') ? base : word.slice(0, -1);
+  }
+  if (
+    word.endsWith('s') &&
+    !word.endsWith('ss') &&
+    !word.endsWith('us') &&
+    !word.endsWith('is') &&
+    !word.endsWith('dns')
+  ) {
+    return word.slice(0, -1);
+  }
+  return word;
+}
+
 function tokenizeText(text: string): Set<string> {
   const words = new Set<string>();
   const lower = text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
   for (const part of lower.split(/[^a-z0-9]+/)) {
     if (part.length >= 2) {
       words.add(part);
+      words.add(stemToken(part));
     }
   }
   return words;
+}
+
+function tokenizeQuery(text: string): string[] {
+  const lower = text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
+  const rawParts: string[] = [];
+  for (const part of lower.split(/[^a-z0-9]+/)) {
+    if (part.length >= 2) {
+      rawParts.push(part);
+    }
+  }
+  const filtered = rawParts.filter((p) => !QUERY_STOP_WORDS.has(p));
+  const active = filtered.length > 0 ? filtered : rawParts;
+  const seenStems = new Set<string>();
+  const out: string[] = [];
+  for (const part of active) {
+    const stem = stemToken(part);
+    if (!seenStems.has(stem)) {
+      seenStems.add(stem);
+      out.push(part);
+    }
+  }
+  return out;
 }
 
 function normalizeRoutePattern(route: string): string {
@@ -542,40 +617,51 @@ function normalizeRoutePattern(route: string): string {
 }
 
 function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefined {
-  const queryTokens = Array.from(tokenizeText(rawQuery));
+  const queryTokens = tokenizeQuery(rawQuery);
   if (queryTokens.length === 0) {
     return undefined;
   }
-
   const routeMatch = rawQuery.trim().match(/^(?:(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+)?(\/\S+)$/i);
   const queryHttpVerb = routeMatch?.[1]?.toUpperCase();
   const queryNormRoute = routeMatch?.[2] ? normalizeRoutePattern(routeMatch[2]) : undefined;
-
+  const queryStems = new Set(queryTokens.map(stemToken));
+  const exactMethodMatches: MethodSchema[] = [];
   const scoredMethods: { method: MethodSchema; score: number; matchedCount: number }[] = [];
   for (const group of Object.values(schema.groups)) {
     const groupWords = tokenizeText(`${group.path} ${group.description ?? ''}`);
     for (const method of group.methods) {
+      const methodPathStems = new Set(tokenizeQuery(method.path).map(stemToken));
+      if (
+        queryNormRoute === undefined &&
+        methodPathStems.size === queryStems.size &&
+        Array.from(queryStems).every((s) => methodPathStems.has(s))
+      ) {
+        exactMethodMatches.push(method);
+      }
       const pathRouteWords = tokenizeText(`${method.httpMethod} ${method.path} ${method.route}`);
       const summaryWords = tokenizeText(method.summary ?? '');
       const descWords = tokenizeText(method.description ?? '');
       let score = 0;
       let matchedCount = 0;
       for (const qt of queryTokens) {
+        const qtStem = stemToken(qt);
         let tokenScore = 0;
-        if (pathRouteWords.has(qt)) {
+        if (pathRouteWords.has(qt) || pathRouteWords.has(qtStem)) {
           tokenScore += 5;
-        } else if (Array.from(pathRouteWords).some((w) => w.includes(qt))) {
+        } else if (
+          Array.from(pathRouteWords).some((w) => w.includes(qt) || (qtStem.length >= 3 && w.includes(qtStem)))
+        ) {
           tokenScore += 3;
         }
-        if (summaryWords.has(qt)) {
+        if (summaryWords.has(qt) || summaryWords.has(qtStem)) {
           tokenScore += 4;
-        } else if (Array.from(summaryWords).some((w) => w.includes(qt))) {
+        } else if (Array.from(summaryWords).some((w) => w.includes(qt) || (qtStem.length >= 3 && w.includes(qtStem)))) {
           tokenScore += 2;
         }
-        if (groupWords.has(qt)) {
+        if (groupWords.has(qt) || groupWords.has(qtStem)) {
           tokenScore += 2;
         }
-        if (descWords.has(qt)) {
+        if (descWords.has(qt) || descWords.has(qtStem)) {
           tokenScore += 1;
         }
         if (tokenScore > 0) {
@@ -593,21 +679,28 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
           }
         }
       }
-      if (
-        matchedCount > 0 &&
-        (matchedCount === queryTokens.length || (queryTokens.length >= 2 && matchedCount >= queryTokens.length - 1))
-      ) {
+      const minRequiredMatches =
+        queryTokens.length <= 1
+          ? 1
+          : queryTokens.length <= 3
+            ? queryTokens.length - 1
+            : Math.min(3, Math.ceil(queryTokens.length * 0.4));
+      if (matchedCount >= minRequiredMatches) {
         const depthPenalty = method.path.split('.').length * 0.2 + method.route.split('/').length * 0.1;
         scoredMethods.push({ method, score: score + matchedCount * 10 - depthPenalty, matchedCount });
       }
     }
   }
+  if (exactMethodMatches.length === 1 && exactMethodMatches[0]) {
+    return `// Search match for '${rawQuery}': client.${exactMethodMatches[0].path}\n${types(schema, exactMethodMatches[0].path)}`;
+  }
   if (scoredMethods.length === 0) {
     return undefined;
   }
   scoredMethods.sort((a, b) => b.score - a.score || a.method.path.localeCompare(b.method.path));
-  const fullMatches = scoredMethods.filter((m) => m.matchedCount === queryTokens.length);
-  const topPool = fullMatches.length > 0 ? fullMatches : scoredMethods;
+  const maxMatched = scoredMethods.reduce((max, m) => (m.matchedCount > max ? m.matchedCount : max), 0);
+  const bestMatches = scoredMethods.filter((m) => m.matchedCount === maxMatched);
+  const topPool = maxMatched >= 2 && bestMatches.length > 0 ? bestMatches : scoredMethods;
   if (topPool.length === 1 && topPool[0]) {
     return `// Search match for '${rawQuery}': client.${topPool[0].method.path}\n${types(schema, topPool[0].method.path)}`;
   }
@@ -942,7 +1035,7 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
   }
 
   // 7. Keyword / route / summary search when symbol is not an exact path (e.g. "kv", "purge cache", "/storage/kv")
-  if (lastDot === -1 || !schema.groups[trimmed.slice(0, lastDot)]) {
+  if (lastDot === -1 || trimmed.includes(' ') || !schema.groups[trimmed.slice(0, lastDot)]) {
     const keywordResults = searchByKeywords(schema, trimmed);
     if (keywordResults !== undefined) {
       return keywordResults;
@@ -1782,6 +1875,14 @@ export function wrapClient<T extends object>(
             return res.then(
               (val) => {
                 logEntry.status = 200;
+                if (isPlainRecord(val) && isPlainRecord(val['result'])) {
+                  const respFlat = methodSchema.responseType
+                    ? resolveFlatObjectType(schema, methodSchema.responseType, new Set(), true)
+                    : undefined;
+                  if (respFlat && !respFlat.fields.some((f) => f.name === 'result')) {
+                    return { ...val['result'], ...val };
+                  }
+                }
                 return val;
               },
               (err: unknown) => {
@@ -1884,16 +1985,36 @@ function prepareCodeBody(code: string): string {
     return 'return undefined;';
   }
   const withoutTrailingSemicolon = trimmed.replace(/;+\s*$/, '');
-  const isSingleExpression =
-    !withoutTrailingSemicolon.includes('\n') &&
-    !/^(return|const|let|var|if|for|while|switch|try|throw|function|class)\b/.test(withoutTrailingSemicolon) &&
-    !withoutTrailingSemicolon.includes(';');
-  if (isSingleExpression) {
-    return `return (${withoutTrailingSemicolon});`;
+  const stmtKeywordRe = /^(return|const|let|var|if|for|while|switch|try|throw|function|class)\b/;
+  if (!stmtKeywordRe.test(withoutTrailingSemicolon)) {
+    const candidate = `return (\n${withoutTrailingSemicolon}\n);`;
+    try {
+      new AsyncFunction('client', 'search', 'types', candidate);
+      return candidate;
+    } catch {
+      // Multi-statement body; fall through
+    }
+  }
+  for (let i = withoutTrailingSemicolon.length - 1; i >= 0; i--) {
+    const ch = withoutTrailingSemicolon[i];
+    if (ch !== ';' && ch !== '\n') {
+      continue;
+    }
+    const prefix = withoutTrailingSemicolon.slice(0, i).trim();
+    const suffix = withoutTrailingSemicolon.slice(i + 1).trim();
+    if (!prefix || !suffix || stmtKeywordRe.test(suffix)) {
+      continue;
+    }
+    const candidate = `${prefix};\nreturn (\n${suffix}\n);`;
+    try {
+      new AsyncFunction('client', 'search', 'types', candidate);
+      return candidate;
+    } catch {
+      continue;
+    }
   }
   return trimmed;
 }
-
 function isCallLogReplaySafe(callLog: readonly CallLogEntry[]): boolean {
   return callLog.every(
     (entry) =>
@@ -1926,8 +2047,11 @@ export async function execute<T extends object>(
     if (typeof codeOrFn === 'function') {
       value = await codeOrFn(checkedClient, typesFn);
     } else {
-      const runner = new AsyncFunction('client', 'types', prepareCodeBody(codeOrFn));
-      value = await runner(checkedClient, typesFn);
+      const runner = new AsyncFunction('client', 'search', 'types', prepareCodeBody(codeOrFn));
+      value = await runner(checkedClient, typesFn, typesFn);
+    }
+    if (typeof value === 'function' && getSymbolPath(value) === undefined) {
+      value = await (value as (c: T, t: (s?: string) => string) => unknown)(checkedClient, typesFn);
     }
     const inspectedSymbol = getSymbolPath(value);
     if (inspectedSymbol !== undefined) {
@@ -1978,9 +2102,6 @@ function encodeWireValue(
   if (!type || value === null || value === undefined || typeof value !== 'object') {
     return value;
   }
-  if (Array.isArray(value)) {
-    return type.kind === 'array' ? value.map((item) => encodeWireValue(schema, type.elem, item, seen)) : value;
-  }
   if (type.kind === 'model') {
     if (seen.has(type.model)) {
       return value;
@@ -2001,6 +2122,9 @@ function encodeWireValue(
         return encodeWireValue(schema, member, value, seen);
       }
     }
+  }
+  if (Array.isArray(value)) {
+    return type.kind === 'array' ? value.map((item) => encodeWireValue(schema, type.elem, item, seen)) : value;
   }
   const flatObj = resolveFlatObjectType(schema, type, new Set(), true);
   if (flatObj && isPlainRecord(value)) {
@@ -2112,11 +2236,15 @@ export async function plan<T extends object>(
   });
   const typesFn = (symbol?: string) => types(schema, symbol);
   try {
+    let value: unknown;
     if (typeof codeOrFn === 'function') {
-      await codeOrFn(checkedClient, typesFn);
+      value = await codeOrFn(checkedClient, typesFn);
     } else {
-      const runner = new AsyncFunction('client', 'types', prepareCodeBody(codeOrFn));
-      await runner(checkedClient, typesFn);
+      const runner = new AsyncFunction('client', 'search', 'types', prepareCodeBody(codeOrFn));
+      value = await runner(checkedClient, typesFn, typesFn);
+    }
+    if (typeof value === 'function' && getSymbolPath(value) === undefined) {
+      await (value as (c: T, t: (s?: string) => string) => unknown)(checkedClient, typesFn);
     }
     return {
       kind: 'invalid',
@@ -2260,9 +2388,14 @@ export function readResource(schema: ApiSchema, uri: string): McpResourceContent
   };
 }
 
+export function search(schema: ApiSchema, query?: string): string {
+  return types(schema, query);
+}
+
 export interface ProgressiveMcp<T extends object> {
   readonly schema: ApiSchema;
   readonly client: T;
+  search(query?: string): string;
   types(symbol?: string): string;
   execute(
     codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
@@ -2277,18 +2410,22 @@ export interface ProgressiveMcp<T extends object> {
   readResource(uri: string): McpResourceContent;
   readonly tools: readonly [
     {
-      readonly name: 'types';
+      readonly name: 'search';
       readonly description: string;
       readonly inputSchema: {
         readonly type: 'object';
         readonly properties: {
+          readonly query: {
+            readonly type: 'string';
+            readonly description: string;
+          };
           readonly symbol: {
             readonly type: 'string';
             readonly description: string;
           };
         };
       };
-      handler(args?: { readonly symbol?: string }): string;
+      handler(args?: { readonly query?: string; readonly symbol?: string }): string;
     },
     {
       readonly name: 'execute';
@@ -2329,6 +2466,9 @@ export function createProgressiveMcp<T extends object>(
   return {
     schema,
     client: checkedClient,
+    search(query?: string): string {
+      return types(schema, query);
+    },
     types(symbol?: string): string {
       return types(schema, symbol);
     },
@@ -2345,21 +2485,26 @@ export function createProgressiveMcp<T extends object>(
     },
     tools: [
       {
-        name: 'types',
+        name: 'search',
         description:
-          'Inspect or search 1-level TypeScript (.d.ts) definitions and JSDoc for any SDK namespace, method, model, or keyword/route (e.g. "dns.records", "dns.records.create", "kv", "purge cache"). Nested models stay nominal until inspected.',
+          'Search or inspect 1-level TypeScript (.d.ts) definitions and JSDoc for any SDK namespace, method, model, HTTP route, or keyword query (e.g. "dns.records", "dns.records.create", "purge cache", "POST /zones/{zoneId}/dns_records"). Nested models stay nominal until inspected.',
         inputSchema: {
           type: 'object',
           properties: {
+            query: {
+              type: 'string',
+              description:
+                'Search query, HTTP route, or dot-separated SDK symbol path (e.g. "purge cache", "kv", "dns.records", "dns.records.create", or omit for top-level index).',
+            },
             symbol: {
               type: 'string',
               description:
-                'Dot-separated SDK symbol path (e.g. "dns.records.create") or search term / route keyword (e.g. "kv", "purge cache", or omit for top-level index).',
+                'Alias for `query`: dot-separated SDK symbol path or search term (e.g. "dns.records.create").',
             },
           },
         },
-        handler(args?: { readonly symbol?: string }): string {
-          return types(schema, args?.symbol);
+        handler(args?: { readonly query?: string; readonly symbol?: string }): string {
+          return types(schema, args?.query ?? args?.symbol);
         },
       },
       {

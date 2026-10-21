@@ -5,6 +5,7 @@ import {
   createProgressiveMcp,
   execute,
   plan,
+  search,
   TypeFeedbackError,
   types,
   wrapClient,
@@ -496,16 +497,17 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.match(res.typeDefinition ?? '', /export interface RecordSettings \{/);
   });
 
-  test('createProgressiveMcp() exposes types/execute MCP tools and SDK group resources', async () => {
+  test('createProgressiveMcp() exposes search/execute MCP tools and SDK group resources', async () => {
     const { client } = makeFakeClient();
     const mcp = createProgressiveMcp(client, schema);
     assert.equal(mcp.tools.length, 2);
-    assert.equal(mcp.tools[0]?.name, 'types');
+    assert.equal(mcp.tools[0]?.name, 'search');
     assert.equal(mcp.tools[1]?.name, 'execute');
 
-    const typesRes = await mcp.tools[0]!.handler({ symbol: 'dns.records.RecordSettings' });
-    assert.match(String(typesRes), /export interface RecordSettings/);
-
+    const searchRes = mcp.tools[0]!.handler({ query: 'dns.records.RecordSettings' });
+    assert.match(String(searchRes), /export interface RecordSettings/);
+    assert.equal(mcp.search('create buckets for organization'), search(schema, 'create buckets for organization'));
+    assert.match(mcp.search('create buckets for organization'), /client\.storage\.buckets\.create/);
     assert.ok(mcp.resources.some((r) => r.uri === 'forge://types' && r.name === 'client'));
     assert.ok(
       mcp.resources.some((r) => r.uri === 'forge://types/dns.records' && r.mimeType === 'application/typescript'),
@@ -764,5 +766,22 @@ describe('Progressive Type-Feedback MCP runtime', () => {
 
     const scopedErr = types(schema, 'dns.records.nonexistent');
     assert.match(scopedErr, /Did you mean: 'dns\.records\.create'/);
+
+    const exactStem = search(schema, 'list dns records');
+    assert.match(exactStem, /\/\/ Search match for 'list dns records': client\.dns\.records\.list/);
+  });
+
+  test('execute() awaits multi-line expressions and returns the trailing expression in multi-statement snippets', async () => {
+    const { client, calls } = makeFakeClient();
+    const res = await execute(
+      client,
+      schema,
+      'const rows = await client.dns.records.list({ zoneId: "z1" });\nconst first = rows[0];\n({ count: rows.length, id: first?.id })',
+    );
+    assert.equal(res.ok, true);
+    assert.equal(calls.length, 1);
+    if (res.ok) {
+      assert.deepEqual(res.result, { count: 1, id: 'rec_123' });
+    }
   });
 });
