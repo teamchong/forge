@@ -499,7 +499,7 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.match(res.typeDefinition ?? '', /export interface RecordSettings \{/);
   });
 
-  test('createProgressiveMcp() exposes search/execute MCP tools and SDK group resources', async () => {
+  test('createProgressiveMcp() exposes search and execute MCP tools', async () => {
     const { client } = makeFakeClient();
     const mcp = createProgressiveMcp(client, schema);
     assert.equal(mcp.tools.length, 2);
@@ -509,23 +509,10 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     const searchRes = mcp.tools[0]!.handler({ code: 'dts("dns.records.RecordSettings")' });
     assert.match(String(searchRes), /export interface RecordSettings \{/);
     assert.match(
-      mcp.search('methods.filter(m => m.summary?.toLowerCase().includes("bucket"))'),
+      String(mcp.search('methods.filter(m => m.summary?.toLowerCase().includes("bucket"))')),
       /client\.storage\.buckets\.create/,
     );
     assert.match(mcp.dts('storage.buckets.create'), /export interface CreateRequest \{/);
-    assert.ok(mcp.resources.some((r) => r.uri === 'forge://sdk' && r.name === 'client'));
-    assert.ok(
-      mcp.resources.some((r) => r.uri === 'forge://sdk/dns.records' && r.mimeType === 'application/typescript'),
-    );
-    assert.equal(mcp.resourceTemplates[0]?.uriTemplate, 'forge://sdk/{query}');
-
-    const groupResource = mcp.readResource('forge://sdk/dns.records');
-    assert.equal(groupResource.uri, 'forge://sdk/dns.records');
-    assert.equal(groupResource.mimeType, 'application/typescript');
-    assert.match(groupResource.text, /export namespace dns\.records \{/);
-
-    const slashResource = mcp.readResource('forge://sdk/dns/records/create');
-    assert.match(slashResource.text, /\/\/ Method: client\.dns\.records\.create/);
 
     const wrapped = wrapClient(client, schema);
     assert.throws(() => Reflect.get(wrapped.dns.records, 'nonExistent'), TypeFeedbackError);
