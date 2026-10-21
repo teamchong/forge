@@ -3,10 +3,10 @@
 //!
 //! Instead of dumping thousands of flattened tool schemas into the prompt or
 //! searching raw OpenAPI JSON paths, agents inspect the SDK's hierarchical
-//! TypeScript definitions one level at a time with `search(query)` (or by
-//! evaluating `client.<group>.<method>` inside `execute(code)`) and execute
-//! typed SDK code with `execute(code)`, receiving compiler-style diagnostics
-//! with the relevant `.d.ts` type definition attached on any mistake.
+//! TypeScript definitions one level at a time with `search(code)` / `dts(symbol)`
+//! (or by evaluating `client.<group>.<method>` inside `execute(code)`) and
+//! execute typed SDK code with `execute(code)`, receiving compiler-style
+//! diagnostics with the relevant `.d.ts` type definition attached on any mistake.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -52,13 +52,17 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let client_opts = client_mod.ident("ClientOptions").ty();
     let create_client = client_mod.ident("createClient");
     let api_schema_ty = mcp_mod.ident("ApiSchema").ty();
+    let code_evaluator_ty = mcp_mod.ident("CodeEvaluator").ty();
     let create_progressive = mcp_mod.ident("createProgressiveMcp");
+    let dts_fn = mcp_mod.ident("dts");
     let execute_fn = mcp_mod.ident("execute");
+    let prepare_code_body_fn = mcp_mod.ident("prepareCodeBody");
     let search_fn = mcp_mod.ident("search");
     let list_resources_fn = mcp_mod.ident("listResources");
     let list_templates_fn = mcp_mod.ident("listResourceTemplates");
     let read_resource_fn = mcp_mod.ident("readResource");
     let exec_opts_ty = mcp_mod.ident("ExecuteOptions").ty();
+    let search_opts_ty = mcp_mod.ident("SearchOptions").ty();
     let progressive_ty = mcp_mod.ident("ProgressiveMcp").ty();
     let type_err = mcp_mod.ident("TypeFeedbackError");
 
@@ -67,7 +71,11 @@ fn mcp_entry_file(schema_json: &str) -> File {
         "export { ",
         create_progressive,
         ", ",
+        dts_fn,
+        ", ",
         execute_fn,
+        ", ",
+        prepare_code_body_fn,
         ", ",
         search_fn,
         ", ",
@@ -85,6 +93,8 @@ fn mcp_entry_file(schema_json: &str) -> File {
         "export type { ",
         api_schema_ty,
         ", ",
+        code_evaluator_ty,
+        ", ",
         exec_opts_ty,
         ", ",
         mcp_mod.ident("ExecuteResult").ty(),
@@ -96,6 +106,10 @@ fn mcp_entry_file(schema_json: &str) -> File {
         mcp_mod.ident("McpResourceTemplate").ty(),
         ", ",
         progressive_ty,
+        ", ",
+        mcp_mod.ident("SearchMethodEntry").ty(),
+        ", ",
+        search_opts_ty,
         ", ",
         mcp_mod.ident("ValidationIssue").ty(),
         " };"

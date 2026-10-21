@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import vm from 'node:vm';
 import {
   type ApiSchema,
+  type CodeEvaluator,
   createProgressiveMcp,
+  dts,
   execute,
+  prepareCodeBody,
   search,
   TypeFeedbackError,
   wrapClient,
@@ -502,10 +506,13 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.equal(mcp.tools[0]?.name, 'search');
     assert.equal(mcp.tools[1]?.name, 'execute');
 
-    const searchRes = mcp.tools[0]!.handler({ query: 'dns.records.RecordSettings' });
-    assert.match(String(searchRes), /export interface RecordSettings/);
-    assert.equal(mcp.search('create buckets for organization'), search(schema, 'create buckets for organization'));
-    assert.match(mcp.search('create buckets for organization'), /client\.storage\.buckets\.create/);
+    const searchRes = mcp.tools[0]!.handler({ code: 'dts("dns.records.RecordSettings")' });
+    assert.match(String(searchRes), /export interface RecordSettings \{/);
+    assert.match(
+      mcp.search('methods.filter(m => m.summary?.toLowerCase().includes("bucket"))'),
+      /client\.storage\.buckets\.create/,
+    );
+    assert.match(mcp.dts('storage.buckets.create'), /export interface CreateRequest \{/);
     assert.ok(mcp.resources.some((r) => r.uri === 'forge://sdk' && r.name === 'client'));
     assert.ok(
       mcp.resources.some((r) => r.uri === 'forge://sdk/dns.records' && r.mimeType === 'application/typescript'),
@@ -586,15 +593,16 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     }
   });
 
-  test('search() supports keyword and route search when the agent only has a search term', () => {
-    const byKeyword = search(schema, 'create bucket');
-    assert.match(byKeyword, /client\.storage\.buckets\.create/);
-    assert.match(byKeyword, /export interface CreateRequest \{/);
+  test('search() executes code-based queries against methods, groups, models, and dts()', () => {
+    const byCode = search(schema, 'methods.filter(m => m.route.includes("/buckets"))');
+    assert.match(byCode, /client\.storage\.buckets\.create/);
 
-    const byMultiMatch = search(schema, 'dns records');
-    assert.match(byMultiMatch, /Search matches for 'dns records'/);
-    assert.match(byMultiMatch, /create\(request: CreateRequest/);
-    assert.match(byMultiMatch, /list\(request: ListRequest/);
+    const byDts = search(schema, 'dts(methods.find(m => m.route.includes("/buckets")))');
+    assert.match(byDts, /export interface CreateRequest \{/);
+
+    const multiMatch = search(schema, 'methods.filter(m => m.group === "dns.records")');
+    assert.match(multiMatch, /2 matching methods - call dts\("<methodPath>"\) for full request\/response \.d\.ts\):/);
+    assert.match(multiMatch, /list\(request: ListRequest/);
   });
   test('flattens nested union-of-models request bodies into a single CreateRequest and prefers TS2561 across union branches', async () => {
     const unionSchema: ApiSchema = {
@@ -731,6 +739,7 @@ describe('Progressive Type-Feedback MCP runtime', () => {
 
     const fromCallExpr = search(schema, 'await client.dns.records.create()');
     assert.match(fromCallExpr, /\/\/ Method: client\.dns\.records\.create/);
+    assert.doesNotMatch(fromCallExpr, /list\(request: ListRequest/);
 
     const fromVerbRoute = search(schema, 'POST /zones/{zoneId}/dns_records');
     assert.match(fromVerbRoute, /\/\/ Method: client\.dns\.records\.create/);
@@ -738,8 +747,6 @@ describe('Progressive Type-Feedback MCP runtime', () => {
 
     const scopedErr = search(schema, 'dns.records.nonexistent');
     assert.match(scopedErr, /Did you mean: 'dns\.records\.create'/);
-    const exactStem = search(schema, 'list dns records');
-    assert.match(exactStem, /\/\/ Search match for 'list dns records': client\.dns\.records\.list/);
   });
 
   test('execute() awaits multi-line expressions and returns the trailing expression in multi-statement snippets', async () => {
@@ -753,6 +760,61 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.equal(calls.length, 1);
     if (res.ok) {
       assert.deepEqual(res.result, { count: 1, id: 'rec_123' });
+    }
+  });
+
+  test('supports custom evaluator sandbox and evaluator: false for Cloudflare Workers / zero-eval hosts', async () => {
+    // Pure lexical prepareCodeBody() never calls new Function()
+    assert.equal(
+      prepareCodeBody('const z = await client.zones.list();\nz[0]'),
+      'const z = await client.zones.list();\nreturn (\nz[0]\n);',
+    );
+
+    // evaluator: false still allows dts("..."), symbol lookup, and HTTP route lookup in search()
+    const noEvalMcp = createProgressiveMcp(makeFakeClient().client, schema, {
+      evaluator: false,
+    });
+    const symOut = await noEvalMcp.search('dts("dns.records.create")');
+    assert.match(symOut, /export interface CreateRequest \{/);
+    const routeOut = await noEvalMcp.search('POST /zones/{zoneId}/dns_records');
+    assert.match(routeOut, /\/\/ Method: client\.dns\.records\.create/);
+    const blockedSearch = await noEvalMcp.search('methods.filter(m => true)');
+    assert.match(blockedSearch, /Arbitrary JavaScript evaluation in search\(\) is disabled/);
+    const blockedExec = await noEvalMcp.execute('await client.dns.records.list({ zoneId: "z1" })');
+    assert.equal(blockedExec.ok, false);
+    if (!blockedExec.ok) {
+      assert.match(blockedExec.error, /Dynamic JavaScript string evaluation in execute\(\) is disabled/);
+    }
+
+    // Pluggable evaluator runs search() and execute() inside an isolated VM context without host globals
+    const vmEvaluator: CodeEvaluator = (_code, globals, functionBody) => {
+      const ctx = vm.createContext({ ...globals });
+      return vm.runInContext(`(async () => {\n${functionBody}\n})()`, ctx);
+    };
+    const { client, calls } = makeFakeClient();
+    const sandboxedMcp = createProgressiveMcp(client, schema, {
+      evaluator: vmEvaluator,
+    });
+
+    const vmSearchOut = await sandboxedMcp.search(
+      'methods.filter(m => m.route.includes("/buckets"))',
+    );
+    assert.match(vmSearchOut, /client\.storage\.buckets\.create/);
+
+    const vmExecRes = await sandboxedMcp.execute(
+      'const rows = await client.dns.records.list({ zoneId: "z1" }); rows[0].name',
+    );
+    assert.equal(vmExecRes.ok, true);
+    assert.equal(calls.length, 1);
+    if (vmExecRes.ok) {
+      assert.equal(vmExecRes.result, 'example.com');
+    }
+
+    // Host process globals are not reachable inside the VM sandbox
+    const leakAttempt = await sandboxedMcp.execute('typeof process');
+    assert.equal(leakAttempt.ok, true);
+    if (leakAttempt.ok) {
+      assert.equal(leakAttempt.result, 'undefined');
     }
   });
 });

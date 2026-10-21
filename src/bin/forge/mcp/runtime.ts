@@ -127,7 +127,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
     return false;
   }
   if (
-    value instanceof Uint8Array ||
+    ArrayBuffer.isView(value) ||
     value instanceof Date ||
     ('epochNanoseconds' in value && typeof value.epochNanoseconds === 'bigint') ||
     ('year' in value &&
@@ -140,7 +140,11 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
     return false;
   }
   const proto: unknown = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
+  return (
+    proto === Object.prototype ||
+    proto === null ||
+    (typeof proto === 'object' && Object.getPrototypeOf(proto) === null)
+  );
 }
 
 function firstSummaryLine(text: string | undefined): string | undefined {
@@ -522,295 +526,258 @@ function findSuggestions(schema: ApiSchema, query: string, limit = 5): string[] 
     .map((item) => item.candidate);
 }
 
-const QUERY_STOP_WORDS = new Set([
-  'the',
-  'and',
-  'for',
-  'with',
-  'from',
-  'into',
-  'that',
-  'this',
-  'how',
-  'can',
-  'you',
-  'our',
-  'all',
-  'any',
-  'existing',
-  'new',
-  'using',
-]);
-
-function stemToken(word: string): string {
-  if (word.length <= 3) {
-    return word;
-  }
-  if (word.endsWith('ies') && word.length > 4) {
-    return `${word.slice(0, -3)}y`;
-  }
-  if (
-    word.endsWith('ches') ||
-    word.endsWith('shes') ||
-    word.endsWith('xes') ||
-    word.endsWith('zes') ||
-    word.endsWith('sses')
-  ) {
-    return word.slice(0, -2);
-  }
-  if (word.endsWith('ed') && word.length > 4) {
-    const base = word.slice(0, -2);
-    return base.endsWith('ch') || base.endsWith('sh') ? base : word.slice(0, -1);
-  }
-  if (
-    word.endsWith('s') &&
-    !word.endsWith('ss') &&
-    !word.endsWith('us') &&
-    !word.endsWith('is') &&
-    !word.endsWith('dns')
-  ) {
-    return word.slice(0, -1);
-  }
-  return word;
-}
-
-function tokenizeText(text: string): Set<string> {
-  const words = new Set<string>();
-  const lower = text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
-  for (const part of lower.split(/[^a-z0-9]+/)) {
-    if (part.length >= 2) {
-      words.add(part);
-      words.add(stemToken(part));
-    }
-  }
-  return words;
-}
-
-function tokenizeQuery(text: string): string[] {
-  const lower = text.replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase();
-  const rawParts: string[] = [];
-  for (const part of lower.split(/[^a-z0-9]+/)) {
-    if (part.length >= 2) {
-      rawParts.push(part);
-    }
-  }
-  const filtered = rawParts.filter((p) => !QUERY_STOP_WORDS.has(p));
-  const active = filtered.length > 0 ? filtered : rawParts;
-  const seenStems = new Set<string>();
-  const out: string[] = [];
-  for (const part of active) {
-    const stem = stemToken(part);
-    if (!seenStems.has(stem)) {
-      seenStems.add(stem);
-      out.push(part);
-    }
-  }
-  return out;
-}
-
 function normalizeRoutePattern(route: string): string {
   return route
     .trim()
     .replace(/\{[^}]+\}/g, '{}')
-    .replace(/\/+$/, '')
+    .replace(/\/+/g, '/')
     .toLowerCase();
 }
 
-function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefined {
-  const queryTokens = tokenizeQuery(rawQuery);
-  if (queryTokens.length === 0) {
+function matchByHttpRoute(schema: ApiSchema, rawQuery: string): string | undefined {
+  const routeMatch = rawQuery
+    .trim()
+    .match(/^(?:(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+)?(\/[A-Za-z0-9._~:/?#[\]@!$&'*+,;=%{}-]+)$/i);
+  if (!routeMatch?.[2]) {
     return undefined;
   }
-  const routeMatch = rawQuery.trim().match(/^(?:(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+)?(\/\S+)$/i);
-  const queryHttpVerb = routeMatch?.[1]?.toUpperCase();
-  const queryNormRoute = routeMatch?.[2] ? normalizeRoutePattern(routeMatch[2]) : undefined;
-  const queryStems = new Set(queryTokens.map(stemToken));
-  const exactMethodMatches: MethodSchema[] = [];
-  const scoredMethods: { method: MethodSchema; score: number; matchedCount: number }[] = [];
+  const queryHttpVerb = routeMatch[1]?.toUpperCase();
+  const queryNormRoute = normalizeRoutePattern(routeMatch[2]);
+  const exactMatches: MethodSchema[] = [];
   for (const group of Object.values(schema.groups)) {
-    const groupWords = tokenizeText(`${group.path} ${group.description ?? ''}`);
     for (const method of group.methods) {
-      const methodPathStems = new Set(tokenizeQuery(method.path).map(stemToken));
-      if (
-        queryNormRoute === undefined &&
-        methodPathStems.size === queryStems.size &&
-        Array.from(queryStems).every((s) => methodPathStems.has(s))
-      ) {
-        exactMethodMatches.push(method);
+      if (normalizeRoutePattern(method.route) !== queryNormRoute) {
+        continue;
       }
-      const pathRouteWords = tokenizeText(`${method.httpMethod} ${method.path} ${method.route}`);
-      const summaryWords = tokenizeText(method.summary ?? '');
-      const descWords = tokenizeText(method.description ?? '');
-      let score = 0;
-      let matchedCount = 0;
-      for (const qt of queryTokens) {
-        const qtStem = stemToken(qt);
-        let tokenScore = 0;
-        if (pathRouteWords.has(qt) || pathRouteWords.has(qtStem)) {
-          tokenScore += 5;
-        } else if (
-          Array.from(pathRouteWords).some((w) => w.includes(qt) || (qtStem.length >= 3 && w.includes(qtStem)))
-        ) {
-          tokenScore += 3;
-        }
-        if (summaryWords.has(qt) || summaryWords.has(qtStem)) {
-          tokenScore += 4;
-        } else if (Array.from(summaryWords).some((w) => w.includes(qt) || (qtStem.length >= 3 && w.includes(qtStem)))) {
-          tokenScore += 2;
-        }
-        if (groupWords.has(qt) || groupWords.has(qtStem)) {
-          tokenScore += 2;
-        }
-        if (descWords.has(qt) || descWords.has(qtStem)) {
-          tokenScore += 1;
-        }
-        if (tokenScore > 0) {
-          matchedCount++;
-          score += tokenScore;
-        }
+      if (queryHttpVerb && method.httpMethod.toUpperCase() !== queryHttpVerb) {
+        continue;
       }
-      if (queryNormRoute !== undefined) {
-        const methodNormRoute = normalizeRoutePattern(method.route);
-        if (methodNormRoute === queryNormRoute) {
-          score += 50;
-          matchedCount = queryTokens.length;
-          if (queryHttpVerb && method.httpMethod.toUpperCase() === queryHttpVerb) {
-            score += 40;
-          }
-        }
-      }
-      const minRequiredMatches =
-        queryTokens.length <= 1
-          ? 1
-          : queryTokens.length <= 3
-            ? queryTokens.length - 1
-            : Math.min(3, Math.ceil(queryTokens.length * 0.4));
-      if (matchedCount >= minRequiredMatches) {
-        const depthPenalty = method.path.split('.').length * 0.2 + method.route.split('/').length * 0.1;
-        scoredMethods.push({ method, score: score + matchedCount * 10 - depthPenalty, matchedCount });
-      }
+      exactMatches.push(method);
     }
   }
-  if (exactMethodMatches.length === 1 && exactMethodMatches[0]) {
-    return `// Search match for '${rawQuery}': client.${exactMethodMatches[0].path}\n${search(schema, exactMethodMatches[0].path)}`;
-  }
-  if (scoredMethods.length === 0) {
+  if (exactMatches.length === 0) {
     return undefined;
   }
-  scoredMethods.sort((a, b) => b.score - a.score || a.method.path.localeCompare(b.method.path));
-  const maxMatched = scoredMethods.reduce((max, m) => (m.matchedCount > max ? m.matchedCount : max), 0);
-  const bestMatches = scoredMethods.filter((m) => m.matchedCount === maxMatched);
-  const topPool = maxMatched >= 2 && bestMatches.length > 0 ? bestMatches : scoredMethods;
-  if (topPool.length === 1 && topPool[0]) {
-    return `// Search match for '${rawQuery}': client.${topPool[0].method.path}\n${search(schema, topPool[0].method.path)}`;
+  if (exactMatches.length === 1 && exactMatches[0]) {
+    return resolveSymbolDts(schema, exactMatches[0].path);
   }
-  if (queryNormRoute !== undefined && queryHttpVerb !== undefined && topPool[0]) {
-    const topMethod = topPool[0].method;
-    if (
-      normalizeRoutePattern(topMethod.route) === queryNormRoute &&
-      topMethod.httpMethod.toUpperCase() === queryHttpVerb
-    ) {
-      return `// Search match for '${rawQuery}': client.${topMethod.path}\n${search(schema, topMethod.path)}`;
-    }
-  }
-  const byGroup = new Map<string, { maxScore: number; methods: MethodSchema[] }>();
-  for (const { method, score } of topPool) {
-    const dot = method.path.lastIndexOf('.');
-    const gPath = dot !== -1 ? method.path.slice(0, dot) : '';
-    const existing = byGroup.get(gPath);
-    if (!existing) {
-      byGroup.set(gPath, { maxScore: score, methods: [method] });
-    } else {
-      if (score > existing.maxScore) {
-        existing.maxScore = score;
-      }
-      existing.methods.push(method);
-    }
-  }
+  return renderMethodListDts(exactMatches, `Route '${rawQuery.trim()}'`);
+}
 
-  // When > 12 methods match across multiple groups, roll up by group so all matching groups fit in ~300-500 tokens without truncation
-  if (topPool.length > 12 && byGroup.size > 2) {
-    const sortedGroups = Array.from(byGroup.entries()).sort(
-      (a, b) => b[1].maxScore - a[1].maxScore || b[1].methods.length - a[1].methods.length || a[0].localeCompare(b[0]),
-    );
-    const lines: string[] = [
-      `// Search matches for '${rawQuery}' (${topPool.length} matching methods across ${byGroup.size} groups — call search("<group>") or search("<group>.<method>") to drill down):`,
-      'export interface SearchMatches {',
-    ];
-    for (const [gPath, info] of sortedGroups.slice(0, 30)) {
-      const methodNames = info.methods.map((m) => m.name);
-      const previewNames =
-        methodNames.length > 6
-          ? `${methodNames.slice(0, 6).join(', ')}, +${methodNames.length - 6}`
-          : methodNames.join(', ');
-      const sampleRoute = info.methods[0]?.route ?? '';
-      lines.push(
-        `  readonly ${formatPropertyKey(gPath)}: ${gPath}.Client; // ${info.methods.length} matching: ${previewNames} (${sampleRoute})`,
-      );
-    }
-    if (sortedGroups.length > 30) {
-      lines.push(`  // ... +${sortedGroups.length - 30} more groups (use a more specific search term)`);
-    }
-    lines.push('}');
-    return lines.join('\n');
-  }
-
-  const top = topPool.slice(0, 12);
+function renderMethodListDts(methods: readonly MethodSchema[], label: string): string {
   const lines: string[] = [
-    `// Search matches for '${rawQuery}' (${topPool.length} matching methods; call search("<methodPath>") for full request/response types):`,
+    `// ${label} (${methods.length} matching methods - call dts("<methodPath>") for full request/response .d.ts):`,
   ];
-  const topByGroup = new Map<string, MethodSchema[]>();
-  for (const { method } of top) {
+  const byGroup = new Map<string, MethodSchema[]>();
+  for (const method of methods.slice(0, 25)) {
     const dot = method.path.lastIndexOf('.');
     const gPath = dot !== -1 ? method.path.slice(0, dot) : '';
-    const list = topByGroup.get(gPath) ?? [];
+    const list = byGroup.get(gPath) ?? [];
     list.push(method);
-    topByGroup.set(gPath, list);
+    byGroup.set(gPath, list);
   }
-  for (const [gPath, methods] of topByGroup.entries()) {
+  for (const [gPath, groupMethods] of byGroup.entries()) {
     lines.push(`\n// Group: client.${gPath}`);
     lines.push(`export namespace ${gPath} {`);
     lines.push('  export interface Client {');
-    for (const m of methods) {
-      lines.push(renderMethodSignature(m, '    ', true));
+    for (const method of groupMethods) {
+      lines.push(renderMethodSignature(method, '    ', true));
     }
     lines.push('  }');
     lines.push('}');
   }
+  if (methods.length > 25) {
+    lines.push(`\n// ... +${methods.length - 25} more matching methods`);
+  }
   return lines.join('\n');
 }
 
-/**
- * Searches or inspects a progressive 1-level `.d.ts` TypeScript & JSDoc definition in the SDK.
- *
- * Examples:
- * - `search(schema)` or `search(schema, "client")` -> top-level `Client` namespaces
- * - `search(schema, "dns.records")` -> 1-level `dns.records.Client` methods & sub-groups
- * - `search(schema, "dns.records.create")` -> method signature + 1-level `CreateRequest` & `CreateResponse`
- * - `search(schema, "dns.records.RecordSettings")` -> 1-level `RecordSettings` model declaration
- * - `search(schema, "purge cache")` -> ranked keyword/route search across all SDK endpoints
- */
-export function search(schema: ApiSchema, rawSymbol?: string): string {
+export interface SearchMethodEntry {
+  readonly path: string;
+  readonly group: string;
+  readonly name: string;
+  readonly httpMethod: string;
+  readonly route: string;
+  readonly summary?: string | undefined;
+  readonly description?: string | undefined;
+}
+
+const METHODS_CACHE = new WeakMap<ApiSchema, readonly SearchMethodEntry[]>();
+
+function getAllMethods(schema: ApiSchema): readonly SearchMethodEntry[] {
+  let cached = METHODS_CACHE.get(schema);
+  if (cached) {
+    return cached;
+  }
+  const all: SearchMethodEntry[] = [];
+  for (const group of Object.values(schema.groups)) {
+    for (const method of group.methods) {
+      all.push({
+        path: method.path,
+        group: group.path,
+        name: method.name,
+        httpMethod: method.httpMethod,
+        route: method.route,
+        ...(method.summary !== undefined ? { summary: method.summary } : {}),
+        ...(method.description !== undefined ? { description: method.description } : {}),
+      });
+    }
+  }
+  cached = Object.freeze(all);
+  METHODS_CACHE.set(schema, cached);
+  return cached;
+}
+
+function extractSymbolFromItem(schema: ApiSchema, item: unknown): string | undefined {
+  if (typeof item === 'string') {
+    return resolveSymbolDts(schema, item) !== undefined ? item : undefined;
+  }
+  const symPath = getSymbolPath(item);
+  if (symPath !== undefined) {
+    return symPath;
+  }
+  if (Array.isArray(item) && item.length === 2 && typeof item[0] === 'string') {
+    if (resolveSymbolDts(schema, item[0]) !== undefined) {
+      return item[0];
+    }
+    return extractSymbolFromItem(schema, item[1]);
+  }
+  if (typeof item === 'object' && item !== null && 'path' in item) {
+    const p = (item as { readonly path: unknown }).path;
+    if (typeof p === 'string' && resolveSymbolDts(schema, p) !== undefined) {
+      return p;
+    }
+  }
+  return undefined;
+}
+
+function formatSearchEvalResult(schema: ApiSchema, value: unknown): string {
+  if (value === undefined || value === null) {
+    return '// 0 matches. Tip: filter `methods` (each has `{ path, group, name, httpMethod, route, summary, description }`), inspect `Object.keys(groups)`, or call `dts("<symbol>")`.';
+  }
+  if (typeof value === 'string') {
+    return resolveSymbolDts(schema, value) ?? value;
+  }
+  const singleSym = extractSymbolFromItem(schema, value);
+  if (singleSym !== undefined) {
+    return resolveSymbolDts(schema, singleSym) ?? JSON.stringify(value, null, 2);
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return '// 0 matches. Tip: filter `methods` (each has `{ path, group, name, httpMethod, route, summary, description }`), inspect `Object.keys(groups)`, or call `dts("<symbol>")`.';
+    }
+    if (value.every((item) => typeof item === 'string')) {
+      const strItems = value as readonly string[];
+      if (strItems.every((s) => s.includes('export ') || s.startsWith('// '))) {
+        return strItems.join('\n\n');
+      }
+    }
+    const symbols = value.map((item) => extractSymbolFromItem(schema, item));
+    if (symbols.every((s): s is string => s !== undefined)) {
+      if (symbols.length === 1) {
+        return resolveSymbolDts(schema, symbols[0]!)!;
+      }
+      const allMethodsByPath = new Map<string, MethodSchema>();
+      for (const g of Object.values(schema.groups)) {
+        for (const m of g.methods) {
+          allMethodsByPath.set(m.path, m);
+        }
+      }
+      if (symbols.every((s) => allMethodsByPath.has(s))) {
+        return renderMethodListDts(
+          symbols.map((s) => allMethodsByPath.get(s)!),
+          'Search result',
+        );
+      }
+      const preview = symbols
+        .slice(0, 25)
+        .map((s) => {
+          const g = schema.groups[s];
+          if (g) {
+            return `  readonly ${formatPropertyKey(g.path)}: ${g.path}.Client; // ${countGroupMethods(schema, g.path)} methods`;
+          }
+          return `  // ${s}`;
+        })
+        .join('\n');
+      const more = symbols.length > 25 ? `\n  // ... +${symbols.length - 25} more` : '';
+      return `// ${symbols.length} matching symbols - call dts("<symbol>") to inspect:\nexport interface SearchMatches {\n${preview}${more}\n}`;
+    }
+    return JSON.stringify(value, null, 2);
+  }
+  if (isPlainRecord(value)) {
+    const entries = Object.entries(value);
+    if (entries.length > 0 && entries.length <= 10) {
+      return entries
+        .map(([k, v]) => `// === ${k} ===\n${formatSearchEvalResult(schema, v)}`)
+        .join('\n\n');
+    }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function createSearchSymbolProxy(path = ''): unknown {
+  const target = () => undefined;
+  Object.defineProperty(target, SYMBOL_PATH, { value: path || 'client' });
+  return new Proxy(target, {
+    get(_t, prop) {
+      if (prop === SYMBOL_PATH) {
+        return path || 'client';
+      }
+      if (typeof prop === 'symbol') {
+        return undefined;
+      }
+      return createSearchSymbolProxy(path ? `${path}.${prop}` : prop);
+    },
+  });
+}
+
+function cleanSymbolPath(schema: ApiSchema, rawSymbol?: string): string {
   const cleaned = (rawSymbol ?? '')
     .trim()
+    .replace(/;+$/, '')
     .replace(/^await\s+/, '')
-    .replace(/^client\.?/, '')
-    .replace(/\(.*\)$/, '')
+    .replace(/^return\s+/, '')
+    .replace(/^dts\s*\(\s*([^()]*?)\s*\)$/, '$1')
+    .trim()
+    .replace(/^['"`]+|['"`]+$/g, '')
+    .replace(/^client\./, '')
     .replace(/\.Client$/, '')
+    .replace(/^([A-Za-z0-9_.$]+)\([^()]*\)$/, '$1')
     .trim();
   const camelized = cleaned
     .split('.')
     .map((seg) => seg.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase()))
     .join('.');
-  const trimmed =
-    cleaned !== '' &&
+  return (
     !schema.groups[cleaned] &&
     !schema.models[cleaned] &&
     (schema.groups[camelized] !== undefined ||
       schema.models[camelized] !== undefined ||
-      (camelized.includes('.') && schema.groups[camelized.slice(0, camelized.lastIndexOf('.'))] !== undefined))
+      (camelized.includes('.') &&
+        schema.groups[camelized.slice(0, camelized.lastIndexOf('.'))] !== undefined))
       ? camelized
-      : cleaned;
+      : cleaned
+  );
+}
+
+/**
+ * Renders a progressive 1-level `.d.ts` TypeScript & JSDoc definition for an SDK symbol,
+ * method/group/model object, or array of matches.
+ */
+export function dts(schema: ApiSchema, target?: unknown): string {
+  if (typeof target === 'string' || target === undefined || target === null) {
+    const rawSymbol = typeof target === 'string' ? target : '';
+    const resolved = resolveSymbolDts(schema, rawSymbol);
+    if (resolved !== undefined) {
+      return resolved;
+    }
+    return renderUnknownSymbolDiagnostic(schema, rawSymbol);
+  }
+  return formatSearchEvalResult(schema, target);
+}
+
+function resolveSymbolDts(schema: ApiSchema, rawSymbol?: string): string | undefined {
+  const trimmed = cleanSymbolPath(schema, rawSymbol);
 
   // 1. Root Client view
   if (trimmed === '' || trimmed === 'Client') {
@@ -818,10 +785,12 @@ export function search(schema: ApiSchema, rawSymbol?: string): string {
     const totalGroups = Object.keys(schema.groups).length;
     const totalMethods = Object.values(schema.groups).reduce((sum, g) => sum + g.methods.length, 0);
     const totalModels = Object.keys(schema.models).length;
-    lines.push(`// API Version: ${schema.version}${schema.baseUrl ? ` | Base URL: ${schema.baseUrl}` : ''}`);
+    lines.push(
+      `// API Version: ${schema.version}${schema.baseUrl ? ` | Base URL: ${schema.baseUrl}` : ''}`,
+    );
     lines.push(`// ${totalGroups} groups, ${totalMethods} methods, ${totalModels} models`);
     lines.push(
-      '// Tip: inspect `client.<group>` or call `search("<group>.<method>")` to drill down 1 level at a time.',
+      '// Tip: call dts("<group>") or filter `methods` in search({ code }) to drill down 1 level at a time.',
     );
     const rootSummary = firstSummaryLine(schema.description);
     if (rootSummary) {
@@ -1009,21 +978,26 @@ export function search(schema: ApiSchema, rawSymbol?: string): string {
   }
 
   // 5. Unqualified model name lookup (e.g. "RecordSettings" when unique or matching models)
-  const matchingModels = Object.values(schema.models).filter((m) => m.name === trimmed || m.schemaName === trimmed);
+  const matchingModels = Object.values(schema.models).filter(
+    (m) => m.name === trimmed || m.schemaName === trimmed,
+  );
   if (matchingModels.length === 1) {
-    return search(schema, matchingModels[0]!.path);
+    return resolveSymbolDts(schema, matchingModels[0]!.path);
   }
   if (matchingModels.length > 1) {
     return (
       `Multiple models match '${trimmed}': ${matchingModels.map((m) => m.path).join(', ')}.\n\n` +
-      search(schema, matchingModels[0]!.path)
+      (resolveSymbolDts(schema, matchingModels[0]!.path) ?? '')
     );
   }
+
   // 6. Suffix match on group or method path (e.g. "access.applications" -> "zeroTrust.access.applications")
   const lowerSuffix = `.${trimmed.toLowerCase()}`;
-  const suffixGroups = Object.keys(schema.groups).filter((g) => g.toLowerCase().endsWith(lowerSuffix));
+  const suffixGroups = Object.keys(schema.groups).filter((g) =>
+    g.toLowerCase().endsWith(lowerSuffix),
+  );
   if (suffixGroups.length === 1 && suffixGroups[0]) {
-    return `// Note: '${trimmed}' is located at 'client.${suffixGroups[0]}'\n${search(schema, suffixGroups[0])}`;
+    return `// Note: '${trimmed}' is located at 'client.${suffixGroups[0]}'\n${resolveSymbolDts(schema, suffixGroups[0])}`;
   }
   const suffixMethods: string[] = [];
   for (const g of Object.values(schema.groups)) {
@@ -1034,29 +1008,184 @@ export function search(schema: ApiSchema, rawSymbol?: string): string {
     }
   }
   if (suffixMethods.length === 1 && suffixMethods[0]) {
-    return `// Note: '${trimmed}' is located at 'client.${suffixMethods[0]}'\n${search(schema, suffixMethods[0])}`;
+    return `// Note: '${trimmed}' is located at 'client.${suffixMethods[0]}'\n${resolveSymbolDts(schema, suffixMethods[0])}`;
   }
 
-  // 7. Keyword / route / summary search when symbol is not an exact path (e.g. "kv", "purge cache", "/storage/kv")
-  if (lastDot === -1 || trimmed.includes(' ') || !schema.groups[trimmed.slice(0, lastDot)]) {
-    const keywordResults = searchByKeywords(schema, trimmed);
-    if (keywordResults !== undefined) {
-      return keywordResults;
+  // 7. Exact HTTP route match (e.g. "POST /zones/{zoneId}/dns_records" or "/zones/{zoneId}/purge_cache")
+  if (rawSymbol && rawSymbol.includes('/')) {
+    const routeResult = matchByHttpRoute(schema, rawSymbol);
+    if (routeResult !== undefined) {
+      return routeResult;
     }
   }
 
-  // 8. Symbol not found -> provide closest suggestions + parent group popup if prefix matched
+  return undefined;
+}
+
+function renderUnknownSymbolDiagnostic(schema: ApiSchema, rawSymbol: string): string {
+  const trimmed = cleanSymbolPath(schema, rawSymbol);
+  const lastDot = trimmed.lastIndexOf('.');
   const suggestions = findSuggestions(schema, trimmed);
-  const suggestionText = suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `'${s}'`).join(', ')}?` : '';
+  const suggestionText =
+    suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `'${s}'`).join(', ')}?` : '';
   if (lastDot !== -1) {
     const parentPath = trimmed.slice(0, lastDot);
     if (schema.groups[parentPath]) {
-      return `TS2339: Symbol '${trimmed}' does not exist on '${parentPath}'.${suggestionText}\n\n${search(schema, parentPath)}`;
+      return `TS2339: Symbol '${trimmed}' does not exist on '${parentPath}'.${suggestionText}\n\n${resolveSymbolDts(schema, parentPath)}`;
     }
   }
   return `TS2304: Cannot find symbol '${trimmed}'.${suggestionText}`;
 }
 
+/**
+ * Custom JavaScript evaluator / sandbox hook for `search()` and `execute()`.
+ *
+ * Allows hosts (such as Cloudflare Workers using Dynamic Worker isolates, `@cloudflare/codemode`,
+ * QuickJS, or Node `vm.runInNewContext`) to evaluate agent code out-of-process or in an isolated
+ * sandbox without calling `new Function` / `new AsyncFunction` in the host isolate.
+ *
+ * @param code - The raw JavaScript expression or multi-statement snippet from the agent.
+ * @param globals - Bound runtime globals (`{ schema, methods, groups, models, dts, client }` for `search`,
+ *   or `{ client, search, dts, schema }` for `execute`).
+ * @param functionBody - Normalized function body with automatic `return (...)` wrapping on the trailing expression.
+ */
+export type CodeEvaluator = (
+  code: string,
+  globals: Readonly<Record<string, unknown>>,
+  functionBody: string,
+) => unknown | Promise<unknown>;
+
+export interface SearchOptions {
+  /**
+   * Custom sandbox or JavaScript evaluator for code-based `search()` queries
+   * (e.g. Node `vm.runInNewContext`, QuickJS, or a Cloudflare Dynamic Worker isolate).
+   * Pass `false` to disable dynamic JS evaluation and restrict `search()` to
+   * zero-eval symbol paths (`"dns.records.create"`, `dts("...")`) and HTTP routes.
+   */
+  readonly evaluator?: CodeEvaluator | false | undefined;
+}
+
+function finishSearchEvalValue(schema: ApiSchema, value: unknown): string {
+  let resolved = value;
+  if (typeof resolved === 'function' && getSymbolPath(resolved) === undefined) {
+    resolved = (resolved as (s: ApiSchema) => unknown)(schema);
+  }
+  return formatSearchEvalResult(schema, resolved);
+}
+
+function formatSearchEvalError(schema: ApiSchema, trimmed: string, err: unknown): string {
+  const fallback = resolveSymbolDts(schema, trimmed);
+  if (fallback !== undefined) {
+    return fallback;
+  }
+  const msg = err instanceof Error ? err.message : String(err);
+  if (err instanceof EvalError) {
+    return (
+      `Search error: Dynamic JavaScript compilation is disallowed in this runtime (${msg}).\n` +
+      `// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an \`evaluator\` sandbox in createMcp.`
+    );
+  }
+  return `Search error: ${msg}\n// Tip: write a JS expression using \`methods\` (array of { path, group, name, httpMethod, route, summary, description }), \`groups\`, \`models\`, or \`dts("<symbol>")\`.`;
+}
+
+/**
+ * Searches or inspects the SDK by running JavaScript against `{ schema, methods, groups, models, dts, client }`
+ * or resolving a 1-level `.d.ts` symbol path directly.
+ *
+ * Direct symbol paths (`"dns.records.create"`), `dts("<symbol>")` calls, and HTTP routes (`"POST /zones/{zoneId}/dns_records"`)
+ * resolve via pure static lookup without invoking `new Function` or `evaluator`.
+ *
+ * Examples:
+ * - `search(schema)` or `search(schema, "dts()")` -> top-level `Client` namespaces
+ * - `search(schema, "dns.records")` or `search(schema, 'dts("dns.records")')` -> 1-level `dns.records.Client`
+ * - `search(schema, "dns.records.create")` -> method signature + 1-level `CreateRequest` & `CreateResponse`
+ * - `search(schema, 'methods.filter(m => m.route.includes("purge_cache"))')` -> code-based search returning 1-level `.d.ts`
+ */
+export function search(schema: ApiSchema, codeOrSymbol?: string): string;
+export function search(
+  schema: ApiSchema,
+  codeOrSymbol: string | undefined,
+  options: SearchOptions | undefined,
+): string | Promise<string>;
+export function search(
+  schema: ApiSchema,
+  codeOrSymbol?: string,
+  options?: SearchOptions,
+): string | Promise<string> {
+  if (!codeOrSymbol || !codeOrSymbol.trim()) {
+    return resolveSymbolDts(schema, '')!;
+  }
+  const trimmed = codeOrSymbol.trim();
+  const isSimpleDtsCall = /^dts\s*\(\s*(?:(['"`])[^'"`]*\1)?\s*\)\s*;?$/.test(trimmed);
+  const isCodeExpr =
+    !isSimpleDtsCall && /^(?:dts|methods|groups|models|schema)\s*[.([]/.test(trimmed);
+  if (!isCodeExpr) {
+    const direct = resolveSymbolDts(schema, trimmed);
+    if (direct !== undefined) {
+      return direct;
+    }
+  }
+
+  const searchGlobals = new Set(['methods', 'groups', 'models', 'schema', 'client', 'dts']);
+  const cleaned = cleanSymbolPath(schema, trimmed);
+  if (
+    !isCodeExpr &&
+    /^[a-zA-Z0-9_.$]+$/.test(cleaned) &&
+    !searchGlobals.has(cleaned)
+  ) {
+    return renderUnknownSymbolDiagnostic(schema, trimmed);
+  }
+
+  if (options?.evaluator === false) {
+    return (
+      `Search error: Arbitrary JavaScript evaluation in search() is disabled (evaluator: false).\n` +
+      `// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an \`evaluator\` sandbox in createMcp.`
+    );
+  }
+
+  const allMethods = getAllMethods(schema);
+  const boundDts = (target?: unknown): string => dts(schema, target);
+  const clientProxy = createSearchSymbolProxy();
+  try {
+    const body = prepareCodeBody(trimmed);
+    if (typeof options?.evaluator === 'function') {
+      const globals: Readonly<Record<string, unknown>> = {
+        schema,
+        methods: allMethods,
+        groups: schema.groups,
+        models: schema.models,
+        dts: boundDts,
+        client: clientProxy,
+      };
+      const rawValue = options.evaluator(trimmed, globals, body);
+      if (
+        rawValue instanceof Promise ||
+        (typeof rawValue === 'object' &&
+          rawValue !== null &&
+          typeof (rawValue as { readonly then?: unknown }).then === 'function')
+      ) {
+        return Promise.resolve(rawValue).then(
+          (val) => finishSearchEvalValue(schema, val),
+          (err: unknown) => formatSearchEvalError(schema, trimmed, err),
+        );
+      }
+      return finishSearchEvalValue(schema, rawValue);
+    }
+
+    const runner = new Function('schema', 'methods', 'groups', 'models', 'dts', 'client', body) as (
+      schema: ApiSchema,
+      methods: readonly SearchMethodEntry[],
+      groups: Readonly<Record<string, GroupSchema>>,
+      models: Readonly<Record<string, ModelSchema>>,
+      dts: (target?: unknown) => string,
+      client: unknown,
+    ) => unknown;
+    const value = runner(schema, allMethods, schema.groups, schema.models, boundDts, clientProxy);
+    return finishSearchEvalValue(schema, value);
+  } catch (err: unknown) {
+    return formatSearchEvalError(schema, trimmed, err);
+  }
+}
 function validateValue(
   schema: ApiSchema,
   type: TypeSchema,
@@ -1704,7 +1833,7 @@ function getSymbolPath(value: unknown): string | undefined {
  * with compiler diagnostics and the relevant `.d.ts` type definition BEFORE any HTTP request is made.
  * Returning an uninvoked namespace, method, or model from `execute()` inspects its 1-level `.d.ts` signature.
  */
-export interface ExecuteOptions {
+export interface ExecuteOptions extends SearchOptions {
   /**
    * Default parameter values for the session (e.g. `{ orgId: 'org_123' }`).
    * Automatically injected into methods that declare a matching required parameter
@@ -1716,8 +1845,14 @@ export interface ExecuteOptions {
    * and `defaultParams` (e.g. `{ orgId: 'Select an organization first with orgs.list.' }`).
    */
   readonly unresolvedParams?: Readonly<Record<string, string>> | undefined;
+  /**
+   * Custom sandbox or JavaScript evaluator for string snippets passed to `execute()` and `search()`
+   * (e.g. Node `vm.runInNewContext`, `@cloudflare/codemode`, or a Cloudflare Dynamic Worker isolate).
+   * Receives `(code, globals, functionBody)` where `globals` contains `{ client, search, dts, schema }`.
+   * Pass `false` to forbid dynamic string evaluation unless a callback function is used.
+   */
+  readonly evaluator?: CodeEvaluator | false | undefined;
 }
-
 class MissingParamError extends Error {
   readonly param: string;
   readonly methodPath: string;
@@ -1837,15 +1972,14 @@ export function wrapClient<T extends object>(
         const ownerType = groupPath === '' ? 'Client' : `${groupPath}.Client`;
         const lowerSuffix = `.${fullPath.toLowerCase()}`;
         const suffixGroup = Object.keys(schema.groups).find((g) => g.toLowerCase().endsWith(lowerSuffix));
-        const keywordMatches = !suffixGroup && groupPath === '' ? searchByKeywords(schema, fullPath) : undefined;
         const hint = suffixGroup
           ? ` Did you mean 'client.${suffixGroup}'?`
           : closest && closest.dist <= 3
             ? ` Did you mean '${closest.name}'?`
-            : available.length > 0
-              ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
-              : '';
-        const defBody = suffixGroup ? search(schema, suffixGroup) : (keywordMatches ?? search(schema, groupPath));
+          : available.length > 0
+            ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
+            : '';
+        const defBody = suffixGroup ? dts(schema, suffixGroup) : dts(schema, groupPath);
         throw new TypeFeedbackError(
           [
             {
@@ -1949,42 +2083,120 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as
   ...args: string[]
 ) => (...callArgs: unknown[]) => Promise<unknown>;
 
-function prepareCodeBody(code: string): string {
+function findLastTopLevelStatementBoundary(src: string): number {
+  let depth = 0;
+  let lastBoundary = -1;
+  let i = 0;
+  const len = src.length;
+
+  while (i < len) {
+    const ch = src[i]!;
+    const next = src[i + 1];
+
+    if (ch === '/' && next === '/') {
+      i += 2;
+      while (i < len && src[i] !== '\n') {
+        i++;
+      }
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < len && !(src[i] === '*' && src[i + 1] === '/')) {
+        i++;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') {
+      const quote = ch;
+      i++;
+      while (i < len) {
+        if (src[i] === '\\') {
+          i += 2;
+          continue;
+        }
+        if (src[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '(' || ch === '[' || ch === '{') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === ')' || ch === ']' || ch === '}') {
+      depth = Math.max(0, depth - 1);
+      i++;
+      continue;
+    }
+
+    if (depth === 0) {
+      if (ch === ';') {
+        lastBoundary = i;
+      } else if (ch === '\n') {
+        const before = src.slice(0, i).trimEnd();
+        const after = src.slice(i + 1).trimStart();
+        const continuesFromBefore =
+          before.length === 0 ||
+          /[.,+*\-%&|^=<>?:!~([{/]$/.test(before) ||
+          /\b(?:return|const|let|var|await|typeof|void|delete|new|in|instanceof|of|else|do|try|finally)\s*$/.test(
+            before,
+          );
+        const continuesOnAfter =
+          after.length === 0 ||
+          /^(?:\?\.|[.,+*\-%&|^=<>?:)\]}]|\/(?![/*])|\b(?:in|instanceof|else|catch|finally|while)\b)/.test(
+            after,
+          );
+        if (!continuesFromBefore && !continuesOnAfter) {
+          lastBoundary = i;
+        }
+      }
+    }
+    i++;
+  }
+
+  return lastBoundary;
+}
+
+/**
+ * Normalizes an agent JavaScript snippet into a function body that returns its trailing expression
+ * using pure lexical scanning (zero `new Function` / `eval` calls).
+ */
+export function prepareCodeBody(code: string): string {
   const trimmed = code.trim();
   if (trimmed === '') {
     return 'return undefined;';
   }
-  const withoutTrailingSemicolon = trimmed.replace(/;+\s*$/, '');
-  const stmtKeywordRe = /^(return|const|let|var|if|for|while|switch|try|throw|function|class)\b/;
-  if (!stmtKeywordRe.test(withoutTrailingSemicolon)) {
-    const candidate = `return (\n${withoutTrailingSemicolon}\n);`;
-    try {
-      new AsyncFunction('client', 'search', candidate);
-      return candidate;
-    } catch {
-      // Multi-statement body; fall through
-    }
+  const withoutTrailingSemicolon = trimmed.replace(/;+\s*$/, '').trim();
+  if (withoutTrailingSemicolon === '') {
+    return 'return undefined;';
   }
-  for (let i = withoutTrailingSemicolon.length - 1; i >= 0; i--) {
-    const ch = withoutTrailingSemicolon[i];
-    if (ch !== ';' && ch !== '\n') {
-      continue;
+  const stmtKeywordRe =
+    /^(return|const|let|var|if|for|while|do|switch|try|throw|function|class|break|continue)\b/;
+  const splitIdx = findLastTopLevelStatementBoundary(withoutTrailingSemicolon);
+  if (splitIdx === -1) {
+    if (!stmtKeywordRe.test(withoutTrailingSemicolon)) {
+      return `return (\n${withoutTrailingSemicolon}\n);`;
     }
-    const prefix = withoutTrailingSemicolon.slice(0, i).trim();
-    const suffix = withoutTrailingSemicolon.slice(i + 1).trim();
-    if (!prefix || !suffix || stmtKeywordRe.test(suffix)) {
-      continue;
-    }
-    const candidate = `${prefix};\nreturn (\n${suffix}\n);`;
-    try {
-      new AsyncFunction('client', 'search', candidate);
-      return candidate;
-    } catch {
-      continue;
-    }
+    return trimmed;
+  }
+  const prefix = withoutTrailingSemicolon
+    .slice(0, splitIdx)
+    .replace(/;+\s*$/, '')
+    .trim();
+  const suffix = withoutTrailingSemicolon.slice(splitIdx + 1).trim();
+  if (prefix && suffix && !stmtKeywordRe.test(suffix)) {
+    return `${prefix};\nreturn (\n${suffix}\n);`;
   }
   return trimmed;
 }
+
 function isCallLogReplaySafe(callLog: readonly CallLogEntry[]): boolean {
   return callLog.every(
     (entry) =>
@@ -2006,30 +2218,72 @@ function isCallLogReplaySafe(callLog: readonly CallLogEntry[]): boolean {
 export async function execute<T extends object>(
   client: T,
   schema: ApiSchema,
-  codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
+  codeOrFn:
+    | string
+    | ((
+        client: T,
+        searchFn: (query?: string) => string | Promise<string>,
+        dtsFn: (target?: unknown) => string,
+      ) => unknown | Promise<unknown>),
   options?: ExecuteOptions | undefined,
 ): Promise<ExecuteResult> {
   const callLog: CallLogEntry[] = [];
   const checkedClient = wrapClient(client, schema, '', { options, callLog });
-  const searchFn = (query?: string) => search(schema, query);
+  const searchFn = (query?: string): string | Promise<string> => search(schema, query, options);
+  const dtsFn = (target?: unknown): string => dts(schema, target);
   try {
     let value: unknown;
     if (typeof codeOrFn === 'function') {
-      value = await codeOrFn(checkedClient, searchFn);
+      value = await codeOrFn(checkedClient, searchFn, dtsFn);
+    } else if (options?.evaluator === false) {
+      return {
+        ok: false,
+        error:
+          'Dynamic JavaScript string evaluation in execute() is disabled (evaluator: false). Configure an `evaluator` sandbox in ExecuteOptions / createMcp or pass a callback function.',
+        replaySafe: true,
+      };
     } else {
-      const runner = new AsyncFunction('client', 'search', prepareCodeBody(codeOrFn));
-      value = await runner(checkedClient, searchFn);
+      const body = prepareCodeBody(codeOrFn);
+      if (typeof options?.evaluator === 'function') {
+        const globals: Readonly<Record<string, unknown>> = {
+          client: checkedClient,
+          search: searchFn,
+          dts: dtsFn,
+          schema,
+        };
+        value = await options.evaluator(codeOrFn, globals, body);
+      } else {
+        try {
+          const runner = new AsyncFunction('client', 'search', 'dts', body);
+          value = await runner(checkedClient, searchFn, dtsFn);
+        } catch (compileErr: unknown) {
+          if (compileErr instanceof EvalError && callLog.length === 0) {
+            return {
+              ok: false,
+              error: `Dynamic JavaScript compilation is disallowed in this runtime (${compileErr.message}). Configure an \`evaluator\` sandbox (e.g. Cloudflare Dynamic Worker isolate or VM sandbox) in createMcp / ExecuteOptions, or pass a callback function to execute().`,
+              replaySafe: true,
+            };
+          }
+          throw compileErr;
+        }
+      }
     }
     if (typeof value === 'function' && getSymbolPath(value) === undefined) {
-      value = await (value as (c: T, s: (q?: string) => string) => unknown)(checkedClient, searchFn);
+      value = await (
+        value as (
+          c: T,
+          s: (q?: string) => string | Promise<string>,
+          d: (t?: unknown) => string,
+        ) => unknown
+      )(checkedClient, searchFn, dtsFn);
     }
     const inspectedSymbol = getSymbolPath(value);
     if (inspectedSymbol !== undefined) {
-      const def = search(schema, inspectedSymbol);
+      const def = dts(schema, inspectedSymbol);
       return { ok: true, result: def, typeDefinition: def };
     }
     return { ok: true, result: value };
-  } catch (err) {
+  } catch (err: unknown) {
     const replaySafe = isCallLogReplaySafe(callLog);
     if (err instanceof TypeFeedbackError) {
       return {
@@ -2177,9 +2431,16 @@ export function readResource(schema: ApiSchema, uri: string): McpResourceContent
 export interface ProgressiveMcp<T extends object> {
   readonly schema: ApiSchema;
   readonly client: T;
-  search(query?: string): string;
+  search(codeOrSymbol?: string, options?: SearchOptions): string | Promise<string>;
+  dts(target?: unknown): string;
   execute(
-    codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
+    codeOrFn:
+      | string
+      | ((
+          client: T,
+          searchFn: (query?: string) => string | Promise<string>,
+          dtsFn: (target?: unknown) => string,
+        ) => unknown | Promise<unknown>),
     options?: ExecuteOptions | undefined,
   ): Promise<ExecuteResult>;
   readonly resources: readonly McpResource[];
@@ -2192,13 +2453,13 @@ export interface ProgressiveMcp<T extends object> {
       readonly inputSchema: {
         readonly type: 'object';
         readonly properties: {
-          readonly query: {
-            readonly type: 'string';
-            readonly description: string;
-          };
+          readonly code: { readonly type: 'string'; readonly description: string };
         };
       };
-      handler(args?: { readonly query?: string }): string;
+      handler(args?: {
+        readonly code?: string;
+        readonly query?: string;
+      }): string | Promise<string>;
     },
     {
       readonly name: 'execute';
@@ -2207,14 +2468,8 @@ export interface ProgressiveMcp<T extends object> {
         readonly type: 'object';
         readonly required: readonly ['code'];
         readonly properties: {
-          readonly code: {
-            readonly type: 'string';
-            readonly description: string;
-          };
-          readonly params?: {
-            readonly type: 'object';
-            readonly description: string;
-          };
+          readonly code: { readonly type: 'string'; readonly description: string };
+          readonly params: { readonly type: 'object'; readonly description: string };
         };
       };
       handler(args: {
@@ -2239,11 +2494,16 @@ export function createProgressiveMcp<T extends object>(
   return {
     schema,
     client: checkedClient,
-    search(query?: string): string {
-      return search(schema, query);
+    search(codeOrSymbol?: string, options?: SearchOptions): string | Promise<string> {
+      return search(schema, codeOrSymbol, options ?? defaultOptions);
+    },
+    dts(target?: unknown): string {
+      return dts(schema, target);
     },
     execute(codeOrFn, options): Promise<ExecuteResult> {
-      return execute(client, schema, codeOrFn, options ?? defaultOptions);
+      const mergedOpts: ExecuteOptions | undefined =
+        options !== undefined ? { ...defaultOptions, ...options } : defaultOptions;
+      return execute(client, schema, codeOrFn, mergedOpts);
     },
     resources,
     resourceTemplates,
@@ -2254,19 +2514,22 @@ export function createProgressiveMcp<T extends object>(
       {
         name: 'search',
         description:
-          'Search or inspect 1-level TypeScript (.d.ts) definitions and JSDoc for any SDK namespace, method, model, HTTP route, or keyword query (e.g. "dns.records", "dns.records.create", "purge cache", "POST /zones/{zoneId}/dns_records"). Nested models stay nominal until inspected.',
+          'Search the SDK with JavaScript against `methods`, `groups`, and `models`, or call `dts("<symbol>")` to inspect 1-level TypeScript (.d.ts) definitions and JSDoc (e.g. `methods.filter(m => m.route.includes("purge_cache"))`, `dts("dns.records.create")`). Nested models stay nominal until inspected.',
         inputSchema: {
           type: 'object',
           properties: {
-            query: {
+            code: {
               type: 'string',
               description:
-                'Search query, HTTP route, or dot-separated SDK symbol path (e.g. "purge cache", "kv", "dns.records", "dns.records.create", or omit for top-level index).',
+                'JavaScript expression/snippet filtering `methods` ({ path, group, name, httpMethod, route, summary, description }), `groups`, `models`, or `dts("<symbol>")` / symbol path (e.g. `methods.filter(m => m.route.includes("purge"))`, `dts("dns.records.create")`, or omit for top-level index).',
             },
           },
         },
-        handler(args?: { readonly query?: string }): string {
-          return search(schema, args?.query);
+        handler(args?: {
+          readonly code?: string;
+          readonly query?: string;
+        }): string | Promise<string> {
+          return search(schema, args?.code ?? args?.query, defaultOptions);
         },
       },
       {
