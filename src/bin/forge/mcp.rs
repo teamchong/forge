@@ -54,11 +54,11 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let api_schema_ty = mcp_mod.ident("ApiSchema").ty();
     let create_progressive = mcp_mod.ident("createProgressiveMcp");
     let execute_fn = mcp_mod.ident("execute");
-    let plan_fn = mcp_mod.ident("plan");
     let search_fn = mcp_mod.ident("search");
     let list_resources_fn = mcp_mod.ident("listResources");
     let list_templates_fn = mcp_mod.ident("listResourceTemplates");
     let read_resource_fn = mcp_mod.ident("readResource");
+    let exec_opts_ty = mcp_mod.ident("ExecuteOptions").ty();
     let progressive_ty = mcp_mod.ident("ProgressiveMcp").ty();
     let type_err = mcp_mod.ident("TypeFeedbackError");
 
@@ -68,8 +68,6 @@ fn mcp_entry_file(schema_json: &str) -> File {
         create_progressive,
         ", ",
         execute_fn,
-        ", ",
-        plan_fn,
         ", ",
         search_fn,
         ", ",
@@ -87,9 +85,7 @@ fn mcp_entry_file(schema_json: &str) -> File {
         "export type { ",
         api_schema_ty,
         ", ",
-        mcp_mod.ident("CallPlan").ty(),
-        ", ",
-        mcp_mod.ident("ExecuteOptions").ty(),
+        exec_opts_ty,
         ", ",
         mcp_mod.ident("ExecuteResult").ty(),
         ", ",
@@ -115,6 +111,8 @@ fn mcp_entry_file(schema_json: &str) -> File {
         client_ty,
         " | ",
         client_opts,
+        ", defaultOptions?: ",
+        exec_opts_ty,
         "): ",
         progressive_ty,
         "<",
@@ -130,7 +128,7 @@ fn mcp_entry_file(schema_json: &str) -> File {
             create_client,
             "(clientOrOptions) : clientOrOptions;"
         );
-        p!(f, "return ", create_progressive, "(client, schema);");
+        p!(f, "return ", create_progressive, "(client, schema, defaultOptions);");
     });
     p!(f, "}");
     f

@@ -1716,10 +1716,6 @@ export interface ExecuteOptions {
    * and `defaultParams` (e.g. `{ orgId: 'Select an organization first with orgs.list.' }`).
    */
   readonly unresolvedParams?: Readonly<Record<string, string>> | undefined;
-  /**
-   * Override base URL when building requests in `plan()`.
-   */
-  readonly baseUrl?: string | undefined;
 }
 
 class MissingParamError extends Error {
@@ -1741,7 +1737,6 @@ interface CallLogEntry {
 interface WrapContext {
   readonly options?: ExecuteOptions | undefined;
   readonly callLog?: CallLogEntry[] | undefined;
-  readonly onPlanRequest?: ((method: MethodSchema, reqArg: unknown) => never) | undefined;
 }
 
 function resolveDefaultArgs(
@@ -1864,13 +1859,10 @@ export function wrapClient<T extends object>(
       }
 
       const rawValue: unknown = Reflect.get(target, prop, receiver);
-      if (methodSchema && (typeof rawValue === 'function' || ctx?.onPlanRequest !== undefined)) {
+      if (methodSchema && typeof rawValue === 'function') {
         const wrappedFn = (...args: unknown[]) => {
           const effectiveArgs = resolveDefaultArgs(methodSchema, args, ctx?.options);
           validateMethodCall(schema, methodSchema, effectiveArgs);
-          if (ctx?.onPlanRequest) {
-            return ctx.onPlanRequest(methodSchema, effectiveArgs[0]);
-          }
           const logEntry: CallLogEntry = { methodSchema };
           ctx?.callLog?.push(logEntry);
           const res = (rawValue as (...callArgs: unknown[]) => unknown).apply(target, effectiveArgs);
@@ -1951,31 +1943,6 @@ export type ExecuteResult =
       readonly extensions?: Readonly<Record<string, unknown>> | undefined;
       readonly replaySafe?: boolean | undefined;
       readonly missingParam?: string | undefined;
-    };
-
-export type CallPlan =
-  | {
-      readonly kind: 'request';
-      readonly method: string;
-      readonly url: string;
-      readonly route: string;
-      readonly methodPath: string;
-      readonly headers: Record<string, string>;
-      readonly body?: string | undefined;
-      readonly extensions?: Readonly<Record<string, unknown>> | undefined;
-      readonly pathParams?: Readonly<Record<string, string>> | undefined;
-    }
-  | {
-      readonly kind: 'missing_param';
-      readonly param: string;
-      readonly message: string;
-      readonly methodPath: string;
-    }
-  | {
-      readonly kind: 'invalid';
-      readonly error: string;
-      readonly issues?: readonly ValidationIssue[] | undefined;
-      readonly typeDefinition?: string | undefined;
     };
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
@@ -2092,190 +2059,6 @@ export async function execute<T extends object>(
       status,
       extensions: lastCall?.methodSchema.extensions,
       replaySafe,
-    };
-  }
-}
-
-function encodeWireValue(
-  schema: ApiSchema,
-  type: TypeSchema | undefined,
-  value: unknown,
-  seen = new Set<string>(),
-): unknown {
-  if (!type || value === null || value === undefined || typeof value !== 'object') {
-    return value;
-  }
-  if (type.kind === 'model') {
-    if (seen.has(type.model)) {
-      return value;
-    }
-    const model = schema.models[type.model];
-    if (!model) {
-      return value;
-    }
-    const nextSeen = new Set(seen);
-    nextSeen.add(type.model);
-    return encodeWireValue(schema, model.type, value, nextSeen);
-  }
-  if (type.kind === 'union') {
-    for (const member of type.members) {
-      const trial: ValidationIssue[] = [];
-      validateValue(schema, member, value, 'body', trial, undefined, new Set());
-      if (trial.length === 0) {
-        return encodeWireValue(schema, member, value, seen);
-      }
-    }
-  }
-  if (Array.isArray(value)) {
-    return type.kind === 'array' ? value.map((item) => encodeWireValue(schema, type.elem, item, seen)) : value;
-  }
-  const flatObj = resolveFlatObjectType(schema, type, new Set(), true);
-  if (flatObj && isPlainRecord(value)) {
-    const byName = new Map<string, FieldSchema>();
-    for (const f of flatObj.fields) {
-      byName.set(f.name, f);
-    }
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value)) {
-      if (v === undefined) {
-        continue;
-      }
-      const field = byName.get(k);
-      if (field) {
-        out[field.wireName] = encodeWireValue(schema, field.type, v, seen);
-      } else {
-        out[k] = encodeWireValue(schema, flatObj.extra, v, seen);
-      }
-    }
-    return out;
-  }
-  return value;
-}
-
-class PlannedCallSignal {
-  readonly plan: CallPlan;
-  constructor(plan: CallPlan) {
-    this.plan = plan;
-  }
-}
-
-function buildCallPlan(
-  schema: ApiSchema,
-  method: MethodSchema,
-  reqArg: unknown,
-  options?: ExecuteOptions | undefined,
-): CallPlan {
-  const baseUrl = (options?.baseUrl ?? schema.baseUrl ?? 'http://localhost').replace(/\/+$/, '');
-  const rec = isPlainRecord(reqArg) ? reqArg : {};
-  let resolvedPath = method.route;
-  const paramNames = new Set<string>();
-  const pathParams: Record<string, string> = {};
-  for (const param of method.requestParams) {
-    paramNames.add(param.name);
-    const val = rec[param.name];
-    if (param.location === 'path' && val !== undefined) {
-      pathParams[param.name] = String(val);
-      resolvedPath = resolvedPath.replace(`{${param.name}}`, encodeURIComponent(String(val)));
-    }
-  }
-  const url = new URL(`${baseUrl}${resolvedPath.startsWith('/') ? '' : '/'}${resolvedPath}`);
-  for (const param of method.requestParams) {
-    if (param.location === 'query') {
-      const val = rec[param.name];
-      if (val !== undefined && val !== null) {
-        url.searchParams.set(param.wireName, String(val));
-      }
-    }
-  }
-  const headers: Record<string, string> = { accept: 'application/json' };
-  let bodyStr: string | undefined;
-  if (method.requestBody) {
-    let rawBody: unknown;
-    if (method.requestFlat) {
-      const bodyObj: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(rec)) {
-        if (!paramNames.has(k) && v !== undefined) {
-          bodyObj[k] = v;
-        }
-      }
-      rawBody = encodeWireValue(schema, method.requestBody.type, bodyObj);
-    } else {
-      rawBody = encodeWireValue(schema, method.requestBody.type, rec['body']);
-    }
-    if (rawBody !== undefined) {
-      headers['content-type'] = 'application/json';
-      bodyStr = JSON.stringify(rawBody);
-    }
-  }
-  return {
-    kind: 'request',
-    method: method.httpMethod,
-    url: url.toString(),
-    route: method.route,
-    methodPath: method.path,
-    headers,
-    body: bodyStr,
-    extensions: method.extensions,
-    pathParams: Object.keys(pathParams).length > 0 ? pathParams : undefined,
-  };
-}
-
-/**
- * Plans an SDK call in a credential-free isolate without making any network request.
- * Validates types, resolves `defaultParams`, encodes `camelCase` SDK properties into wire JSON,
- * and returns the `CallPlan` (`request` with OpenAPI `extensions`, `missing_param`, or `invalid`).
- */
-export async function plan<T extends object>(
-  client: T,
-  schema: ApiSchema,
-  codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
-  options?: ExecuteOptions | undefined,
-): Promise<CallPlan> {
-  const checkedClient = wrapClient(client, schema, '', {
-    options,
-    onPlanRequest(methodSchema, reqArg) {
-      throw new PlannedCallSignal(buildCallPlan(schema, methodSchema, reqArg, options));
-    },
-  });
-  const searchFn = (query?: string) => search(schema, query);
-  try {
-    let value: unknown;
-    if (typeof codeOrFn === 'function') {
-      value = await codeOrFn(checkedClient, searchFn);
-    } else {
-      const runner = new AsyncFunction('client', 'search', prepareCodeBody(codeOrFn));
-      value = await runner(checkedClient, searchFn);
-    }
-    if (typeof value === 'function' && getSymbolPath(value) === undefined) {
-      await (value as (c: T, s: (q?: string) => string) => unknown)(checkedClient, searchFn);
-    }
-    return {
-      kind: 'invalid',
-      error: 'Code did not invoke any SDK method on `client`.',
-    };
-  } catch (err) {
-    if (err instanceof PlannedCallSignal) {
-      return err.plan;
-    }
-    if (err instanceof MissingParamError) {
-      return {
-        kind: 'missing_param',
-        param: err.param,
-        message: err.message,
-        methodPath: err.methodPath,
-      };
-    }
-    if (err instanceof TypeFeedbackError) {
-      return {
-        kind: 'invalid',
-        error: err.message,
-        issues: err.issues,
-        typeDefinition: err.typeDefinition,
-      };
-    }
-    return {
-      kind: 'invalid',
-      error: err instanceof Error ? err.message : String(err),
     };
   }
 }
@@ -2399,10 +2182,6 @@ export interface ProgressiveMcp<T extends object> {
     codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
     options?: ExecuteOptions | undefined,
   ): Promise<ExecuteResult>;
-  plan(
-    codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
-    options?: ExecuteOptions | undefined,
-  ): Promise<CallPlan>;
   readonly resources: readonly McpResource[];
   readonly resourceTemplates: readonly McpResourceTemplate[];
   readResource(uri: string): McpResourceContent;
@@ -2465,9 +2244,6 @@ export function createProgressiveMcp<T extends object>(
     },
     execute(codeOrFn, options): Promise<ExecuteResult> {
       return execute(client, schema, codeOrFn, options ?? defaultOptions);
-    },
-    plan(codeOrFn, options): Promise<CallPlan> {
-      return plan(client, schema, codeOrFn, options ?? defaultOptions);
     },
     resources,
     resourceTemplates,

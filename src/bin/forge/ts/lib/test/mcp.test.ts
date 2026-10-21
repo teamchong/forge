@@ -4,7 +4,6 @@ import {
   type ApiSchema,
   createProgressiveMcp,
   execute,
-  plan,
   search,
   TypeFeedbackError,
   wrapClient,
@@ -525,30 +524,7 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.throws(() => Reflect.get(wrapped.dns.records, 'nonExistent'), TypeFeedbackError);
   });
 
-  test('plan() builds wire HTTP request with extensions and pathParams in a credential-free isolate', async () => {
-    const { client } = makeFakeClient();
-    const callPlan = await plan(
-      client,
-      schema,
-      'await client.dns.records.create({ zoneId: "zone_99", name: "api.example.com", type: "A", ttl: 3600, settings: { ipv4Only: true, flattenCname: false } })',
-    );
-    assert.equal(callPlan.kind, 'request');
-    if (callPlan.kind === 'request') {
-      assert.equal(callPlan.method, 'POST');
-      assert.equal(callPlan.url, 'https://api.example.com/v1/zones/zone_99/dns_records');
-      assert.equal(callPlan.methodPath, 'dns.records.create');
-      assert.deepEqual(callPlan.pathParams, { zoneId: 'zone_99' });
-      assert.deepEqual(callPlan.extensions, { 'x-required-scopes': ['dns:write', 'dns:read'] });
-      assert.deepEqual(JSON.parse(callPlan.body ?? '{}'), {
-        name: 'api.example.com',
-        type: 'A',
-        ttl: 3600,
-        settings: { ipv4_only: true, flatten_cname: false },
-      });
-    }
-  });
-
-  test('auto-injects defaultParams when omitted, or returns missingParam / missing_param plan when unresolved', async () => {
+  test('auto-injects defaultParams when omitted, or returns missingParam when unresolved', async () => {
     const { client, calls } = makeFakeClient();
     // Single-tenant session: auto-injects defaultParams.orgId
     const okRes = await execute(
@@ -565,7 +541,7 @@ describe('Progressive Type-Feedback MCP runtime', () => {
       storageClass: 'InfrequentAccess',
     });
 
-    // Multi-tenant session without resolved orgId: returns missingParam / missing_param plan
+    // Multi-tenant session without resolved orgId: returns missingParam
     const missingRes = await execute(client, schema, 'return await client.storage.buckets.create({ name: "assets" })', {
       unresolvedParams: { orgId: 'Select an organization first with orgs.list.' },
     });
@@ -575,16 +551,6 @@ describe('Progressive Type-Feedback MCP runtime', () => {
       assert.equal(missingRes.replaySafe, true);
       assert.match(missingRes.error, /Select an organization first/);
     }
-
-    const missingPlan = await plan(client, schema, 'await client.storage.buckets.create({ name: "assets" })', {
-      unresolvedParams: { orgId: 'Select an organization first with orgs.list.' },
-    });
-    assert.deepEqual(missingPlan, {
-      kind: 'missing_param',
-      param: 'orgId',
-      message: 'Select an organization first with orgs.list.',
-      methodPath: 'storage.buckets.create',
-    });
   });
 
   test('execute() surfaces 403 status, OpenAPI extensions, and replaySafe status', async () => {
@@ -739,16 +705,16 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.match(dts, /export interface CreateRequest \{[\s\S]*accountId: string;[\s\S]*sessionDuration\?: string;/);
     assert.doesNotMatch(dts, /export interface AppRequest \{/);
 
-    const errPlan = await plan(
-      {},
+    const errRes = await execute(
+      { apps: { async create() {} } },
       unionSchema,
       'await client.apps.create({ accountId: "a1", name: "app", session_duration: "24h" })',
     );
-    assert.equal(errPlan.kind, 'invalid');
-    if (errPlan.kind === 'invalid') {
-      assert.ok(errPlan.issues?.some((i) => i.code === 'TS2561'));
-      assert.match(errPlan.error, /Did you mean 'sessionDuration'/);
-      assert.doesNotMatch(errPlan.typeDefinition ?? '', /export interface AppRequest \{/);
+    assert.equal(errRes.ok, false);
+    if (!errRes.ok) {
+      assert.ok(errRes.issues?.some((i) => i.code === 'TS2561'));
+      assert.match(errRes.error, /Did you mean 'sessionDuration'/);
+      assert.doesNotMatch(errRes.typeDefinition ?? '', /export interface AppRequest \{/);
     }
   });
 
