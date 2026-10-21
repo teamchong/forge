@@ -615,4 +615,125 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.match(byMultiMatch, /create\(request: CreateRequest/);
     assert.match(byMultiMatch, /list\(request: ListRequest/);
   });
+  test('flattens nested union-of-models request bodies into a single CreateRequest and prefers TS2561 across union branches', async () => {
+    const unionSchema: ApiSchema = {
+      ...schema,
+      rootChildren: [...schema.rootChildren, 'apps'],
+      groups: {
+        ...schema.groups,
+        apps: {
+          name: 'apps',
+          path: 'apps',
+          children: [],
+          models: ['apps.AppRequest', 'apps.SelfHostedApp', 'apps.SaasApp'],
+          methods: [
+            {
+              name: 'create',
+              path: 'apps.create',
+              httpMethod: 'POST',
+              route: '/accounts/{accountId}/apps',
+              requestTypeName: 'CreateRequest',
+              requestOptional: false,
+              requestFlat: true,
+              requestParams: [
+                {
+                  name: 'accountId',
+                  wireName: 'account_id',
+                  required: true,
+                  readonly: false,
+                  location: 'path',
+                  type: { kind: 'scalar', scalar: 'string' },
+                },
+              ],
+              requestBody: {
+                required: true,
+                type: { kind: 'model', model: 'apps.AppRequest' },
+              },
+              responseTypeName: 'CreateResponse',
+              responseType: { kind: 'scalar', scalar: 'unknown' },
+            },
+          ],
+        },
+      },
+      models: {
+        ...schema.models,
+        'apps.AppRequest': {
+          name: 'AppRequest',
+          path: 'apps.AppRequest',
+          schemaName: 'app_request',
+          type: {
+            kind: 'union',
+            members: [
+              { kind: 'model', model: 'apps.SelfHostedApp' },
+              { kind: 'model', model: 'apps.SaasApp' },
+            ],
+          },
+        },
+        'apps.SelfHostedApp': {
+          name: 'SelfHostedApp',
+          path: 'apps.SelfHostedApp',
+          schemaName: 'self_hosted_app',
+          type: {
+            kind: 'object',
+            fields: [
+              {
+                name: 'name',
+                wireName: 'name',
+                required: true,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+              {
+                name: 'domain',
+                wireName: 'domain',
+                required: true,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+              {
+                name: 'sessionDuration',
+                wireName: 'session_duration',
+                required: false,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+            ],
+          },
+        },
+        'apps.SaasApp': {
+          name: 'SaasApp',
+          path: 'apps.SaasApp',
+          schemaName: 'saas_app',
+          type: {
+            kind: 'object',
+            fields: [
+              {
+                name: 'name',
+                wireName: 'name',
+                required: false,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    const dts = types(unionSchema, 'apps.create');
+    assert.match(dts, /export interface CreateRequest \{[\s\S]*accountId: string;[\s\S]*sessionDuration\?: string;/);
+    assert.doesNotMatch(dts, /export interface AppRequest \{/);
+
+    const errPlan = await plan(
+      {},
+      unionSchema,
+      'await client.apps.create({ accountId: "a1", name: "app", session_duration: "24h" })',
+    );
+    assert.equal(errPlan.kind, 'invalid');
+    if (errPlan.kind === 'invalid') {
+      assert.ok(errPlan.issues?.some((i) => i.code === 'TS2561'));
+      assert.match(errPlan.error, /Did you mean 'sessionDuration'/);
+      assert.doesNotMatch(errPlan.typeDefinition ?? '', /export interface AppRequest \{/);
+    }
+  });
 });

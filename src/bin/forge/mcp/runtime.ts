@@ -377,13 +377,18 @@ function renderRequestDeclaration(schema: ApiSchema, method: MethodSchema): stri
     const flatObj = resolveFlatObjectType(schema, body.type, new Set(), true);
     if (flatObj) {
       const byName = new Map<string, FieldSchema>();
+      for (const p of params) {
+        byName.set(p.name, p);
+      }
       for (const f of flatObj.fields) {
-        if (!f.readonly) {
+        if (!f.readonly && f.required && !byName.has(f.name)) {
           byName.set(f.name, f);
         }
       }
-      for (const p of params) {
-        byName.set(p.name, p);
+      for (const f of flatObj.fields) {
+        if (!f.readonly && !f.required && !byName.has(f.name)) {
+          byName.set(f.name, f);
+        }
       }
       const block = renderFieldsBlock(schema, Array.from(byName.values()), flatObj.extra, '  ', false);
       return block === '' ? `export type ${name} = Record<string, never>;` : `export interface ${name} {\n${block}\n}`;
@@ -1082,13 +1087,28 @@ function validateValue(
             return;
           }
         }
-        const deepMatches = memberTrials
-          .filter(({ trial }) => trial.length > 0 && trial.every((iss) => iss.path.startsWith(`${path}.`)))
-          .sort((a, b) => a.trial.length - b.trial.length);
-        if (deepMatches[0]) {
-          issues.push(...deepMatches[0].trial);
-          return;
-        }
+      }
+      const deepMatches = memberTrials
+        .filter(
+          ({ trial }) =>
+            trial.length > 0 && trial.every((iss) => iss.path.startsWith(`${path}.`) || iss.code === 'TS2741'),
+        )
+        .sort((a, b) => {
+          const unknownA = a.trial.filter((i) => i.code === 'TS2353').length;
+          const unknownB = b.trial.filter((i) => i.code === 'TS2353').length;
+          if (unknownA !== unknownB) {
+            return unknownA - unknownB;
+          }
+          const nonMissingA = a.trial.filter((i) => i.code !== 'TS2741').length;
+          const nonMissingB = b.trial.filter((i) => i.code !== 'TS2741').length;
+          if (nonMissingA !== nonMissingB) {
+            return nonMissingA - nonMissingB;
+          }
+          return a.trial.length - b.trial.length;
+        });
+      if (deepMatches[0]) {
+        issues.push(...deepMatches[0].trial);
+        return;
       }
       issues.push({
         code: 'TS2322',
@@ -1179,11 +1199,7 @@ function resolveFlatObjectType(
       return { fields: Array.from(byName.values()), extra, modelSymbol };
     }
     case 'union': {
-      if (
-        !allowInlineObjectUnion ||
-        type.members.length === 0 ||
-        !type.members.some((m) => m.kind === 'object' || m.kind === 'intersection')
-      ) {
+      if (!allowInlineObjectUnion || type.members.length === 0) {
         return undefined;
       }
       const branchObjects: { fields: readonly FieldSchema[]; extra: TypeSchema | undefined }[] = [];
@@ -1200,23 +1216,35 @@ function resolveFlatObjectType(
       >();
       for (const branch of branchObjects) {
         for (const f of branch.fields) {
-          const tk = formatTypeExpr(f.type, 'top', schema);
+          const memberTypes = f.type.kind === 'union' ? f.type.members : [f.type];
           const existing = fieldBranches.get(f.name);
           if (!existing) {
+            const types: TypeSchema[] = [];
+            const typeKeys = new Set<string>();
+            for (const mt of memberTypes) {
+              const tk = formatTypeExpr(mt, 'top', schema);
+              if (!typeKeys.has(tk)) {
+                typeKeys.add(tk);
+                types.push(mt);
+              }
+            }
             fieldBranches.set(f.name, {
               field: f,
               count: 1,
-              types: [f.type],
-              typeKeys: new Set([tk]),
+              types,
+              typeKeys,
             });
           } else {
             existing.count++;
             if (!f.required) {
               existing.field = { ...existing.field, required: false };
             }
-            if (!existing.typeKeys.has(tk)) {
-              existing.typeKeys.add(tk);
-              existing.types.push(f.type);
+            for (const mt of memberTypes) {
+              const tk = formatTypeExpr(mt, 'top', schema);
+              if (!existing.typeKeys.has(tk)) {
+                existing.typeKeys.add(tk);
+                existing.types.push(mt);
+              }
             }
           }
         }
@@ -1232,6 +1260,7 @@ function resolveFlatObjectType(
           type: mergedType,
         });
       }
+      mergedFields.sort((a, b) => (a.required === b.required ? 0 : a.required ? -1 : 1));
       return { fields: mergedFields, extra: undefined, modelSymbol: undefined };
     }
     default:
@@ -1471,6 +1500,13 @@ export function validateMethodCall(schema: ApiSchema, method: MethodSchema, args
   if (issues.length > 0) {
     const definitions: string[] = [types(schema, method.path)];
     const shownModels = new Set<string>();
+    if (
+      method.requestFlat &&
+      method.requestBody?.type.kind === 'model' &&
+      resolveFlatObjectType(schema, method.requestBody.type, new Set(), true)?.fields !== undefined
+    ) {
+      shownModels.add(method.requestBody.type.model);
+    }
     for (const issue of issues) {
       if (issue.symbol && !shownModels.has(issue.symbol) && schema.models[issue.symbol]) {
         shownModels.add(issue.symbol);
