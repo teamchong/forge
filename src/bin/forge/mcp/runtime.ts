@@ -66,7 +66,6 @@ export interface MethodSchema {
   readonly responseTypeName: string;
   readonly responseType?: TypeSchema | undefined;
   readonly responseOptional?: boolean | undefined;
-  readonly permissions?: readonly string[] | undefined;
   readonly extensions?: Readonly<Record<string, unknown>> | undefined;
 }
 
@@ -355,9 +354,6 @@ function renderMethodSignature(method: MethodSchema, indent = '  ', brief = fals
   const parts = [method.summary, method.description]
     .filter((s): s is string => typeof s === 'string' && s.trim() !== '')
     .filter((s, idx, arr) => idx === 0 || s !== arr[0]);
-  if (!brief && method.permissions && method.permissions.length > 0) {
-    parts.push(`Permissions: ${method.permissions.join(', ')}`);
-  }
   const docText = brief ? firstSummaryLine(method.summary ?? method.description) : parts.join('\n\n');
   const doc = formatJsDoc(docText, method.deprecated, indent);
   const reqParam = method.requestTypeName
@@ -1503,27 +1499,29 @@ function getSymbolPath(value: unknown): string | undefined {
  */
 export interface ExecuteOptions {
   /**
-   * Default account ID for the session (e.g. auto-resolved from a single-account token
-   * or passed via the `account_id` tool argument). Automatically injected into methods
-   * that require `accountId` when omitted by the caller.
+   * Default parameter values for the session (e.g. `{ orgId: 'org_123' }`).
+   * Automatically injected into methods that declare a matching required parameter
+   * when omitted by the caller.
    */
-  readonly accountId?: string | undefined;
+  readonly defaultParams?: Readonly<Record<string, unknown>> | undefined;
   /**
-   * Message returned when an account-scoped endpoint is called without `accountId`
-   * and the session has multiple accounts (`accountId` is undefined).
+   * Custom guidance messages for required parameters when omitted by both the caller
+   * and `defaultParams` (e.g. `{ orgId: 'Select an organization first with orgs.list.' }`).
    */
-  readonly unresolvedAccountMessage?: string | undefined;
+  readonly unresolvedParams?: Readonly<Record<string, string>> | undefined;
   /**
    * Override base URL when building requests in `plan()`.
    */
   readonly baseUrl?: string | undefined;
 }
 
-class NeedsAccountError extends Error {
+class MissingParamError extends Error {
+  readonly param: string;
   readonly methodPath: string;
-  constructor(message: string, methodPath: string) {
+  constructor(message: string, param: string, methodPath: string) {
     super(message);
-    this.name = 'NeedsAccountError';
+    this.name = 'MissingParamError';
+    this.param = param;
     this.methodPath = methodPath;
   }
 }
@@ -1539,35 +1537,48 @@ interface WrapContext {
   readonly onPlanRequest?: ((method: MethodSchema, reqArg: unknown) => never) | undefined;
 }
 
-function resolveAccountArgs(
+function resolveDefaultArgs(
   methodSchema: MethodSchema,
   args: unknown[],
   options?: ExecuteOptions | undefined,
 ): unknown[] {
-  const needsAccountParam = methodSchema.requestParams.some((p) => p.name === 'accountId' && p.required);
-  if (!needsAccountParam) {
+  const defaultParams = options?.defaultParams;
+  const unresolvedParams = options?.unresolvedParams;
+  if (!defaultParams && !unresolvedParams) {
+    return args;
+  }
+  const requiredParams = methodSchema.requestParams.filter(
+    (p) =>
+      p.required &&
+      ((defaultParams !== undefined && (p.name in defaultParams || p.wireName in defaultParams)) ||
+        (unresolvedParams !== undefined && (p.name in unresolvedParams || p.wireName in unresolvedParams))),
+  );
+  if (requiredParams.length === 0) {
     return args;
   }
   const first = args[0];
-  const hasAccountProp =
-    isPlainRecord(first) &&
-    ((typeof first['accountId'] === 'string' && first['accountId'] !== '') ||
-      (typeof first['account_id'] === 'string' && first['account_id'] !== ''));
-  if (hasAccountProp) {
+  const record = isPlainRecord(first) ? first : undefined;
+  let injected: Record<string, unknown> | undefined;
+  for (const param of requiredParams) {
+    const existing = record?.[param.name] ?? record?.[param.wireName];
+    if (existing !== undefined && existing !== '') {
+      continue;
+    }
+    const fallback = defaultParams?.[param.name] ?? defaultParams?.[param.wireName];
+    if (fallback !== undefined && fallback !== '') {
+      injected ??= record ? { ...record } : {};
+      injected[param.name] = fallback;
+      continue;
+    }
+    const unresolvedMessage = unresolvedParams?.[param.name] ?? unresolvedParams?.[param.wireName];
+    if (unresolvedMessage !== undefined) {
+      throw new MissingParamError(unresolvedMessage, param.name, methodSchema.path);
+    }
+  }
+  if (!injected) {
     return args;
   }
-  if (options?.accountId !== undefined && options.accountId !== '') {
-    const nextFirst = isPlainRecord(first)
-      ? { accountId: options.accountId, ...first }
-      : first === undefined
-        ? { accountId: options.accountId }
-        : first;
-    return [nextFirst, ...args.slice(1)];
-  }
-  if (options?.unresolvedAccountMessage !== undefined) {
-    throw new NeedsAccountError(options.unresolvedAccountMessage, methodSchema.path);
-  }
-  return args;
+  return first === undefined ? [injected] : [injected, ...args.slice(1)];
 }
 
 /**
@@ -1648,7 +1659,7 @@ export function wrapClient<T extends object>(
       const rawValue: unknown = Reflect.get(target, prop, receiver);
       if (methodSchema && (typeof rawValue === 'function' || ctx?.onPlanRequest !== undefined)) {
         const wrappedFn = (...args: unknown[]) => {
-          const effectiveArgs = resolveAccountArgs(methodSchema, args, ctx?.options);
+          const effectiveArgs = resolveDefaultArgs(methodSchema, args, ctx?.options);
           validateMethodCall(schema, methodSchema, effectiveArgs);
           if (ctx?.onPlanRequest) {
             return ctx.onPlanRequest(methodSchema, effectiveArgs[0]);
@@ -1722,10 +1733,9 @@ export type ExecuteResult =
       readonly issues?: readonly ValidationIssue[] | undefined;
       readonly typeDefinition?: string | undefined;
       readonly status?: number | undefined;
-      readonly missingScope?: string | undefined;
-      readonly permissions?: readonly string[] | undefined;
+      readonly extensions?: Readonly<Record<string, unknown>> | undefined;
       readonly replaySafe?: boolean | undefined;
-      readonly needsAccount?: boolean | undefined;
+      readonly missingParam?: string | undefined;
     };
 
 export type CallPlan =
@@ -1737,11 +1747,12 @@ export type CallPlan =
       readonly methodPath: string;
       readonly headers: Record<string, string>;
       readonly body?: string | undefined;
-      readonly permissions?: readonly string[] | undefined;
-      readonly accountId?: string | undefined;
+      readonly extensions?: Readonly<Record<string, unknown>> | undefined;
+      readonly pathParams?: Readonly<Record<string, string>> | undefined;
     }
   | {
-      readonly kind: 'needs_account';
+      readonly kind: 'missing_param';
+      readonly param: string;
       readonly message: string;
       readonly methodPath: string;
     }
@@ -1788,7 +1799,7 @@ function isCallLogReplaySafe(callLog: readonly CallLogEntry[]): boolean {
  *   returns its 1-level `.d.ts` TypeScript definition.
  * - When a `TypeFeedbackError` occurs, returns `{ ok: false, error, issues, typeDefinition, replaySafe: true }` so the
  *   agent receives the exact compiler-style error and `.d.ts` definition in a single turn.
- * - When an HTTP 401/403 refusal occurs, surfaces `status`, `missingScope`, `permissions` (from `x-api-token-group`), and `replaySafe`.
+ * - When an HTTP 401/403 refusal occurs, surfaces `status`, `extensions` (OpenAPI `x-*` metadata), and `replaySafe`.
  */
 export async function execute<T extends object>(
   client: T,
@@ -1824,11 +1835,11 @@ export async function execute<T extends object>(
         replaySafe,
       };
     }
-    if (err instanceof NeedsAccountError) {
+    if (err instanceof MissingParamError) {
       return {
         ok: false,
         error: err.message,
-        needsAccount: true,
+        missingParam: err.param,
         replaySafe,
       };
     }
@@ -1837,25 +1848,11 @@ export async function execute<T extends object>(
       typeof err === 'object' && err !== null && 'status' in err && typeof err.status === 'number'
         ? err.status
         : undefined;
-    let missingScope =
-      typeof err === 'object' && err !== null && 'missingScope' in err && typeof err.missingScope === 'string'
-        ? err.missingScope
-        : undefined;
-    if (
-      missingScope === undefined &&
-      typeof err === 'object' &&
-      err !== null &&
-      'response' in err &&
-      err.response instanceof Response
-    ) {
-      missingScope = err.response.headers.get('x-mcp-missing-scope') ?? undefined;
-    }
     return {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
       status,
-      missingScope,
-      permissions: lastCall?.methodSchema.permissions,
+      extensions: lastCall?.methodSchema.extensions,
       replaySafe,
     };
   }
@@ -1930,23 +1927,19 @@ function buildCallPlan(
   reqArg: unknown,
   options?: ExecuteOptions | undefined,
 ): CallPlan {
-  const baseUrl = (options?.baseUrl ?? schema.baseUrl ?? 'https://api.cloudflare.com/client/v4').replace(/\/+$/, '');
+  const baseUrl = (options?.baseUrl ?? schema.baseUrl ?? 'http://localhost').replace(/\/+$/, '');
   const rec = isPlainRecord(reqArg) ? reqArg : {};
   let resolvedPath = method.route;
   const paramNames = new Set<string>();
-  let accountId: string | undefined;
-
+  const pathParams: Record<string, string> = {};
   for (const param of method.requestParams) {
     paramNames.add(param.name);
     const val = rec[param.name];
-    if (param.name === 'accountId' && typeof val === 'string') {
-      accountId = val;
-    }
     if (param.location === 'path' && val !== undefined) {
+      pathParams[param.name] = String(val);
       resolvedPath = resolvedPath.replace(`{${param.name}}`, encodeURIComponent(String(val)));
     }
   }
-
   const url = new URL(`${baseUrl}${resolvedPath.startsWith('/') ? '' : '/'}${resolvedPath}`);
   for (const param of method.requestParams) {
     if (param.location === 'query') {
@@ -1956,7 +1949,6 @@ function buildCallPlan(
       }
     }
   }
-
   const headers: Record<string, string> = { accept: 'application/json' };
   let bodyStr: string | undefined;
   if (method.requestBody) {
@@ -1977,7 +1969,6 @@ function buildCallPlan(
       bodyStr = JSON.stringify(rawBody);
     }
   }
-
   return {
     kind: 'request',
     method: method.httpMethod,
@@ -1986,15 +1977,15 @@ function buildCallPlan(
     methodPath: method.path,
     headers,
     body: bodyStr,
-    permissions: method.permissions,
-    accountId,
+    extensions: method.extensions,
+    pathParams: Object.keys(pathParams).length > 0 ? pathParams : undefined,
   };
 }
 
 /**
  * Plans an SDK call in a credential-free isolate without making any network request.
- * Validates types, resolves `accountId`, encodes `camelCase` SDK properties into wire JSON,
- * and returns the `CallPlan` (`request` with `permissions` from `x-api-token-group`, `needs_account`, or `invalid`).
+ * Validates types, resolves `defaultParams`, encodes `camelCase` SDK properties into wire JSON,
+ * and returns the `CallPlan` (`request` with OpenAPI `extensions`, `missing_param`, or `invalid`).
  */
 export async function plan<T extends object>(
   client: T,
@@ -2024,9 +2015,10 @@ export async function plan<T extends object>(
     if (err instanceof PlannedCallSignal) {
       return err.plan;
     }
-    if (err instanceof NeedsAccountError) {
+    if (err instanceof MissingParamError) {
       return {
-        kind: 'needs_account',
+        kind: 'missing_param',
+        param: err.param,
         message: err.message,
         methodPath: err.methodPath,
       };
@@ -2084,13 +2076,16 @@ export interface ProgressiveMcp<T extends object> {
             readonly type: 'string';
             readonly description: string;
           };
-          readonly account_id: {
-            readonly type: 'string';
+          readonly params?: {
+            readonly type: 'object';
             readonly description: string;
           };
         };
       };
-      handler(args: { readonly code: string; readonly account_id?: string | undefined }): Promise<ExecuteResult>;
+      handler(args: {
+        readonly code: string;
+        readonly params?: Readonly<Record<string, unknown>> | undefined;
+      }): Promise<ExecuteResult>;
     },
   ];
 }
@@ -2148,16 +2143,24 @@ export function createProgressiveMcp<T extends object>(
               description:
                 'JavaScript expression or async function body using `client` (e.g. `await client.dns.records.list({ zoneId: "..." })`).',
             },
-            account_id: {
-              type: 'string',
+            params: {
+              type: 'object',
               description:
-                'Optional Cloudflare account ID. Automatically injected into account-scoped SDK calls when omitted in `code`.',
+                'Optional default parameter values automatically injected into methods that declare a matching required parameter when omitted in `code`.',
             },
           },
         },
-        handler(args: { readonly code: string; readonly account_id?: string | undefined }): Promise<ExecuteResult> {
+        handler(args: {
+          readonly code: string;
+          readonly params?: Readonly<Record<string, unknown>> | undefined;
+        }): Promise<ExecuteResult> {
           const opts: ExecuteOptions | undefined =
-            args.account_id !== undefined ? { ...defaultOptions, accountId: args.account_id } : defaultOptions;
+            args.params !== undefined
+              ? {
+                  ...defaultOptions,
+                  defaultParams: { ...defaultOptions?.defaultParams, ...args.params },
+                }
+              : defaultOptions;
           return execute(client, schema, args.code, opts);
         },
       },

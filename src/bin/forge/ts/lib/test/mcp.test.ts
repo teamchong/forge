@@ -9,12 +9,11 @@ import {
   types,
   wrapClient,
 } from '../../../mcp/runtime.js';
-
 const schema: ApiSchema = {
   version: '4.0.0',
-  description: 'Cloudflare API',
-  baseUrl: 'https://api.cloudflare.com/client/v4',
-  rootChildren: ['dns', 'r2', 'zones'],
+  description: 'Example API',
+  baseUrl: 'https://api.example.com/v1',
+  rootChildren: ['dns', 'storage', 'zones'],
   rootModels: ['SharedError'],
   groups: {
     dns: {
@@ -112,7 +111,7 @@ const schema: ApiSchema = {
           responseTypeName: 'CreateResponse',
           responseType: { kind: 'model', model: 'dns.records.RecordResponse' },
           responseOptional: false,
-          permissions: ['DNS Write', 'Zone Read'],
+          extensions: { 'x-required-scopes': ['dns:write', 'dns:read'] },
         },
         {
           name: 'list',
@@ -164,41 +163,41 @@ const schema: ApiSchema = {
       models: [],
       methods: [],
     },
-    r2: {
-      name: 'r2',
-      path: 'r2',
-      description: 'R2 Object Storage',
+    storage: {
+      name: 'storage',
+      path: 'storage',
+      description: 'Object Storage.',
       children: ['buckets'],
       models: [],
       methods: [],
     },
-    'r2.buckets': {
+    'storage.buckets': {
       name: 'buckets',
-      path: 'r2.buckets',
-      description: 'Manage R2 buckets.',
+      path: 'storage.buckets',
+      description: 'Manage storage buckets.',
       children: [],
       models: [],
       methods: [
         {
           name: 'create',
-          path: 'r2.buckets.create',
+          path: 'storage.buckets.create',
           httpMethod: 'POST',
-          route: '/accounts/{accountId}/r2/buckets',
+          route: '/orgs/{orgId}/buckets',
           summary: 'Create Bucket',
-          description: 'Creates a new R2 bucket.',
+          description: 'Creates a new storage bucket.',
           deprecated: false,
           requestTypeName: 'CreateRequest',
           requestOptional: false,
           requestFlat: true,
           requestParams: [
             {
-              name: 'accountId',
-              wireName: 'account_id',
+              name: 'orgId',
+              wireName: 'org_id',
               required: true,
               readonly: false,
               deprecated: false,
               location: 'path',
-              description: 'Account identifier.',
+              description: 'Organization identifier.',
               type: { kind: 'scalar', scalar: 'string' },
             },
           ],
@@ -221,7 +220,10 @@ const schema: ApiSchema = {
                   required: false,
                   readonly: false,
                   deprecated: false,
-                  type: { kind: 'enum', values: ['Standard', 'InfrequentAccess'] },
+                  type: {
+                    kind: 'enum',
+                    values: ['Standard', 'InfrequentAccess'],
+                  },
                 },
               ],
             },
@@ -229,7 +231,7 @@ const schema: ApiSchema = {
           responseTypeName: 'CreateResponse',
           responseType: { kind: 'scalar', scalar: 'unknown' },
           responseOptional: false,
-          permissions: ['Workers R2 Storage Write'],
+          extensions: { 'x-required-scopes': ['storage:write'] },
         },
       ],
     },
@@ -348,11 +350,11 @@ function makeFakeClient() {
       },
       firewall: {},
     },
-    r2: {
+    storage: {
       buckets: {
         async create(req?: Record<string, unknown>, ...rest: unknown[]) {
-          calls.push({ method: 'r2.buckets.create', args: [req, ...rest] });
-          return { name: req?.['name'], accountId: req?.['accountId'] };
+          calls.push({ method: 'storage.buckets.create', args: [req, ...rest] });
+          return { name: req?.['name'], orgId: req?.['orgId'] };
         },
       },
     },
@@ -508,24 +510,20 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.throws(() => Reflect.get(wrapped.dns.records, 'nonExistent'), TypeFeedbackError);
   });
 
-  test('plan() builds wire HTTP request with permissions in a credential-free isolate', async () => {
+  test('plan() builds wire HTTP request with extensions and pathParams in a credential-free isolate', async () => {
+    const { client } = makeFakeClient();
     const callPlan = await plan(
-      {},
+      client,
       schema,
-      `await client.dns.records.create({
-         zoneId: 'zone_99',
-         name: 'api.example.com',
-         type: 'A',
-         ttl: 3600,
-         settings: { ipv4Only: true, flattenCname: false }
-       })`,
+      'await client.dns.records.create({ zoneId: "zone_99", name: "api.example.com", type: "A", ttl: 3600, settings: { ipv4Only: true, flattenCname: false } })',
     );
     assert.equal(callPlan.kind, 'request');
     if (callPlan.kind === 'request') {
       assert.equal(callPlan.method, 'POST');
-      assert.equal(callPlan.url, 'https://api.cloudflare.com/client/v4/zones/zone_99/dns_records');
+      assert.equal(callPlan.url, 'https://api.example.com/v1/zones/zone_99/dns_records');
       assert.equal(callPlan.methodPath, 'dns.records.create');
-      assert.deepEqual(callPlan.permissions, ['DNS Write', 'Zone Read']);
+      assert.deepEqual(callPlan.pathParams, { zoneId: 'zone_99' });
+      assert.deepEqual(callPlan.extensions, { 'x-required-scopes': ['dns:write', 'dns:read'] });
       assert.deepEqual(JSON.parse(callPlan.body ?? '{}'), {
         name: 'api.example.com',
         type: 'A',
@@ -535,46 +533,46 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     }
   });
 
-  test('auto-injects session accountId when omitted, or returns needs_account in multi-account sessions', async () => {
+  test('auto-injects defaultParams when omitted, or returns missingParam / missing_param plan when unresolved', async () => {
     const { client, calls } = makeFakeClient();
-
-    // Single-account session: auto-injects accountId
+    // Single-tenant session: auto-injects defaultParams.orgId
     const okRes = await execute(
       client,
       schema,
-      `return await client.r2.buckets.create({ name: 'assets', storageClass: 'InfrequentAccess' })`,
-      { accountId: 'acc_auto_123' },
+      'return await client.storage.buckets.create({ name: "assets", storageClass: "InfrequentAccess" })',
+      { defaultParams: { orgId: 'org_auto_123' } },
     );
     assert.equal(okRes.ok, true);
     assert.equal(calls.length, 1);
     assert.deepEqual(calls[0]?.args[0], {
-      accountId: 'acc_auto_123',
+      orgId: 'org_auto_123',
       name: 'assets',
       storageClass: 'InfrequentAccess',
     });
 
-    // Multi-account session without resolved accountId: returns needsAccount / needs_account plan
-    const missingRes = await execute(client, schema, `await client.r2.buckets.create({ name: 'assets' })`, {
-      unresolvedAccountMessage: 'Select an account first with accounts.list.',
+    // Multi-tenant session without resolved orgId: returns missingParam / missing_param plan
+    const missingRes = await execute(client, schema, 'return await client.storage.buckets.create({ name: "assets" })', {
+      unresolvedParams: { orgId: 'Select an organization first with orgs.list.' },
     });
     assert.equal(missingRes.ok, false);
     if (!missingRes.ok) {
-      assert.equal(missingRes.needsAccount, true);
+      assert.equal(missingRes.missingParam, 'orgId');
       assert.equal(missingRes.replaySafe, true);
-      assert.match(missingRes.error, /Select an account first/);
+      assert.match(missingRes.error, /Select an organization first/);
     }
 
-    const missingPlan = await plan({}, schema, `await client.r2.buckets.create({ name: 'assets' })`, {
-      unresolvedAccountMessage: 'Select an account first with accounts.list.',
+    const missingPlan = await plan(client, schema, 'await client.storage.buckets.create({ name: "assets" })', {
+      unresolvedParams: { orgId: 'Select an organization first with orgs.list.' },
     });
     assert.deepEqual(missingPlan, {
-      kind: 'needs_account',
-      message: 'Select an account first with accounts.list.',
-      methodPath: 'r2.buckets.create',
+      kind: 'missing_param',
+      param: 'orgId',
+      message: 'Select an organization first with orgs.list.',
+      methodPath: 'storage.buckets.create',
     });
   });
 
-  test('execute() surfaces 403 OAuth missingScope, x-api-token-group permissions, and replaySafe status', async () => {
+  test('execute() surfaces 403 status, OpenAPI extensions, and replaySafe status', async () => {
     const refusingClient = {
       dns: {
         records: {
@@ -584,36 +582,32 @@ describe('Progressive Type-Feedback MCP runtime', () => {
           async create() {
             const err = Object.assign(new Error('403 Forbidden'), {
               status: 403,
-              missingScope: 'dns_records:write',
             });
             throw err;
           },
         },
         firewall: {},
       },
-      r2: { buckets: { async create() {} } },
+      storage: { buckets: { async create() {} } },
       zones: {},
     };
-
     // GET followed by 403 POST -> replaySafe is true!
     const safeRes = await execute(
       refusingClient,
       schema,
-      `await client.dns.records.list({ zoneId: 'z1' });
-        await client.dns.records.create({ zoneId: 'z1', name: 'a.com', type: 'A' });`,
+      'await client.dns.records.list({ zoneId: "z1" }); return await client.dns.records.create({ zoneId: "z1", name: "a.com", type: "A" });',
     );
     assert.equal(safeRes.ok, false);
     if (!safeRes.ok) {
       assert.equal(safeRes.status, 403);
-      assert.equal(safeRes.missingScope, 'dns_records:write');
-      assert.deepEqual(safeRes.permissions, ['DNS Write', 'Zone Read']);
+      assert.deepEqual(safeRes.extensions, { 'x-required-scopes': ['dns:write', 'dns:read'] });
       assert.equal(safeRes.replaySafe, true);
     }
   });
 
   test('types() supports keyword and route search when the agent only has a search term', () => {
     const byKeyword = types(schema, 'create bucket');
-    assert.match(byKeyword, /client\.r2\.buckets\.create/);
+    assert.match(byKeyword, /client\.storage\.buckets\.create/);
     assert.match(byKeyword, /export interface CreateRequest \{/);
 
     const byMultiMatch = types(schema, 'dns records');

@@ -174,8 +174,6 @@ struct MethodSchema {
     response_type: Option<TypeSchema>,
     #[serde(skip_serializing_if = "is_false")]
     response_optional: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    permissions: Vec<String>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     extensions: BTreeMap<String, serde_json::Value>,
 }
@@ -439,18 +437,6 @@ fn build_method_schema(m: Method<'_>, group_path: &str, group_names: &HashMap<St
         }),
     };
 
-    let mut permissions = Vec::new();
-    if let Some(ext) = m.extension("x-api-token-group") {
-        if let Some(items) = ext.as_array() {
-            for item in items {
-                if let Some(s) = item.as_str() {
-                    permissions.push(s.to_owned());
-                }
-            }
-        } else if let Some(s) = ext.as_str() {
-            permissions.push(s.to_owned());
-        }
-    }
     let mut extensions = BTreeMap::new();
     for (k, v) in m.extensions() {
         extensions.insert(k.to_owned(), json_to_serde(v));
@@ -472,7 +458,6 @@ fn build_method_schema(m: Method<'_>, group_path: &str, group_names: &HashMap<St
         response_type_name,
         response_type,
         response_optional,
-        permissions,
         extensions,
     }
 }
@@ -622,14 +607,14 @@ mod tests {
     fn generates_mcp_files_and_schema() {
         let doc = r##"{
              "openapi": "3.0.3",
-             "info": { "title": "Cloudflare", "version": "4.0.0", "description": "API" },
-             "servers": [{ "url": "https://api.cloudflare.com/client/v4" }],
+                "info": { "title": "Example", "version": "4.0.0", "description": "API" },
+                "servers": [{ "url": "https://api.example.com/v1" }],
              "paths": {
                  "/zones/{zone_id}/dns_records": {
                      "post": {
                          "x-fern-sdk-group-name": ["dns", "records"],
                          "x-fern-sdk-method-name": "create",
-                         "x-api-token-group": ["DNS Write", "Zone Read"],
+                            "x-required-scopes": ["dns:write", "zone:read"],
                          "summary": "Create DNS Record",
                          "parameters": [
                              {
@@ -698,7 +683,10 @@ mod tests {
         assert_eq!(records.methods[0].name, "create");
         assert_eq!(records.methods[0].path, "dns.records.create");
         assert!(records.methods[0].request_flat);
-        assert_eq!(records.methods[0].permissions, vec!["DNS Write", "Zone Read"]);
+        assert_eq!(
+            records.methods[0].extensions.get("x-required-scopes"),
+            Some(&serde_json::json!(["dns:write", "zone:read"]))
+        );
         assert!(schema.models.contains_key("dns.records.RecordSettings"));
 
         let files = forge::run(&forge, &Generator).unwrap();
