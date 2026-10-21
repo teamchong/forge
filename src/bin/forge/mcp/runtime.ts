@@ -563,19 +563,61 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
   if (topPool.length === 1 && topPool[0]) {
     return `// Search match for '${rawQuery}': client.${topPool[0].method.path}\n${types(schema, topPool[0].method.path)}`;
   }
+  const byGroup = new Map<string, { maxScore: number; methods: MethodSchema[] }>();
+  for (const { method, score } of topPool) {
+    const dot = method.path.lastIndexOf('.');
+    const gPath = dot !== -1 ? method.path.slice(0, dot) : '';
+    const existing = byGroup.get(gPath);
+    if (!existing) {
+      byGroup.set(gPath, { maxScore: score, methods: [method] });
+    } else {
+      if (score > existing.maxScore) {
+        existing.maxScore = score;
+      }
+      existing.methods.push(method);
+    }
+  }
+
+  // When > 12 methods match across multiple groups, roll up by group so all matching groups fit in ~300-500 tokens without truncation
+  if (topPool.length > 12 && byGroup.size > 2) {
+    const sortedGroups = Array.from(byGroup.entries()).sort(
+      (a, b) => b[1].maxScore - a[1].maxScore || b[1].methods.length - a[1].methods.length || a[0].localeCompare(b[0]),
+    );
+    const lines: string[] = [
+      `// Search matches for '${rawQuery}' (${topPool.length} matching methods across ${byGroup.size} groups — call types("<group>") or types("<group>.<method>") to drill down):`,
+      'export interface SearchMatches {',
+    ];
+    for (const [gPath, info] of sortedGroups.slice(0, 30)) {
+      const methodNames = info.methods.map((m) => m.name);
+      const previewNames =
+        methodNames.length > 6
+          ? `${methodNames.slice(0, 6).join(', ')}, +${methodNames.length - 6}`
+          : methodNames.join(', ');
+      const sampleRoute = info.methods[0]?.route ?? '';
+      lines.push(
+        `  readonly ${formatPropertyKey(gPath)}: ${gPath}.Client; // ${info.methods.length} matching: ${previewNames} (${sampleRoute})`,
+      );
+    }
+    if (sortedGroups.length > 30) {
+      lines.push(`  // ... +${sortedGroups.length - 30} more groups (use a more specific search term)`);
+    }
+    lines.push('}');
+    return lines.join('\n');
+  }
+
   const top = topPool.slice(0, 12);
   const lines: string[] = [
     `// Search matches for '${rawQuery}' (${topPool.length} matching methods; call types("<methodPath>") for full request/response types):`,
   ];
-  const byGroup = new Map<string, MethodSchema[]>();
+  const topByGroup = new Map<string, MethodSchema[]>();
   for (const { method } of top) {
     const dot = method.path.lastIndexOf('.');
     const gPath = dot !== -1 ? method.path.slice(0, dot) : '';
-    const list = byGroup.get(gPath) ?? [];
+    const list = topByGroup.get(gPath) ?? [];
     list.push(method);
-    byGroup.set(gPath, list);
+    topByGroup.set(gPath, list);
   }
-  for (const [gPath, methods] of byGroup.entries()) {
+  for (const [gPath, methods] of topByGroup.entries()) {
     lines.push(`\n// Group: client.${gPath}`);
     lines.push(`export namespace ${gPath} {`);
     lines.push('  export interface Client {');
