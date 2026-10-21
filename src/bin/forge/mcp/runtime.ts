@@ -467,21 +467,43 @@ function editDistance(a: string, b: string): number {
 }
 
 function findSuggestions(schema: ApiSchema, query: string, limit = 5): string[] {
+  const lastDot = query.lastIndexOf('.');
+  const parentPath = lastDot !== -1 ? query.slice(0, lastDot) : '';
+  const parentGroup = parentPath ? schema.groups[parentPath] : undefined;
+
   const candidates: string[] = [];
-  for (const group of Object.values(schema.groups)) {
-    candidates.push(group.path);
-    for (const method of group.methods) {
+  if (parentGroup) {
+    for (const child of parentGroup.children) {
+      candidates.push(`${parentGroup.path}.${child}`);
+    }
+    for (const method of parentGroup.methods) {
       candidates.push(method.path);
       if (method.requestTypeName) {
-        candidates.push(`${group.path}.${method.requestTypeName}`);
+        candidates.push(`${parentGroup.path}.${method.requestTypeName}`);
       }
-      candidates.push(`${group.path}.${method.responseTypeName}`);
+      candidates.push(`${parentGroup.path}.${method.responseTypeName}`);
+    }
+    for (const modelName of parentGroup.models) {
+      candidates.push(`${parentGroup.path}.${modelName}`);
+    }
+  } else {
+    for (const group of Object.values(schema.groups)) {
+      candidates.push(group.path);
+      for (const method of group.methods) {
+        candidates.push(method.path);
+        if (method.requestTypeName) {
+          candidates.push(`${group.path}.${method.requestTypeName}`);
+        }
+        candidates.push(`${group.path}.${method.responseTypeName}`);
+      }
+    }
+    for (const model of Object.values(schema.models)) {
+      candidates.push(model.path);
     }
   }
-  for (const model of Object.values(schema.models)) {
-    candidates.push(model.path);
-  }
+
   const ql = query.toLowerCase();
+  const hasDot = query.includes('.');
   return candidates
     .map((candidate) => {
       const cl = candidate.toLowerCase();
@@ -490,7 +512,9 @@ function findSuggestions(schema: ApiSchema, query: string, limit = 5): string[] 
       }
       const short = candidate.split('.').pop() ?? candidate;
       const queryShort = query.split('.').pop() ?? query;
-      const score = Math.min(editDistance(query, candidate), editDistance(queryShort, short) + 0.5);
+      const fullDist = editDistance(query, candidate);
+      const score =
+        !hasDot || parentGroup !== undefined ? Math.min(fullDist, editDistance(queryShort, short) + 0.5) : fullDist;
       return { candidate, score };
     })
     .sort((a, b) => a.score - b.score || a.candidate.localeCompare(b.candidate))
@@ -509,16 +533,29 @@ function tokenizeText(text: string): Set<string> {
   return words;
 }
 
+function normalizeRoutePattern(route: string): string {
+  return route
+    .trim()
+    .replace(/\{[^}]+\}/g, '{}')
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
 function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefined {
   const queryTokens = Array.from(tokenizeText(rawQuery));
   if (queryTokens.length === 0) {
     return undefined;
   }
+
+  const routeMatch = rawQuery.trim().match(/^(?:(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+)?(\/\S+)$/i);
+  const queryHttpVerb = routeMatch?.[1]?.toUpperCase();
+  const queryNormRoute = routeMatch?.[2] ? normalizeRoutePattern(routeMatch[2]) : undefined;
+
   const scoredMethods: { method: MethodSchema; score: number; matchedCount: number }[] = [];
   for (const group of Object.values(schema.groups)) {
     const groupWords = tokenizeText(`${group.path} ${group.description ?? ''}`);
     for (const method of group.methods) {
-      const pathRouteWords = tokenizeText(`${method.path} ${method.route}`);
+      const pathRouteWords = tokenizeText(`${method.httpMethod} ${method.path} ${method.route}`);
       const summaryWords = tokenizeText(method.summary ?? '');
       const descWords = tokenizeText(method.description ?? '');
       let score = 0;
@@ -546,11 +583,21 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
           score += tokenScore;
         }
       }
+      if (queryNormRoute !== undefined) {
+        const methodNormRoute = normalizeRoutePattern(method.route);
+        if (methodNormRoute === queryNormRoute) {
+          score += 50;
+          matchedCount = queryTokens.length;
+          if (queryHttpVerb && method.httpMethod.toUpperCase() === queryHttpVerb) {
+            score += 40;
+          }
+        }
+      }
       if (
         matchedCount > 0 &&
         (matchedCount === queryTokens.length || (queryTokens.length >= 2 && matchedCount >= queryTokens.length - 1))
       ) {
-        const depthPenalty = method.path.split('.').length * 0.2;
+        const depthPenalty = method.path.split('.').length * 0.2 + method.route.split('/').length * 0.1;
         scoredMethods.push({ method, score: score + matchedCount * 10 - depthPenalty, matchedCount });
       }
     }
@@ -563,6 +610,15 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
   const topPool = fullMatches.length > 0 ? fullMatches : scoredMethods;
   if (topPool.length === 1 && topPool[0]) {
     return `// Search match for '${rawQuery}': client.${topPool[0].method.path}\n${types(schema, topPool[0].method.path)}`;
+  }
+  if (queryNormRoute !== undefined && queryHttpVerb !== undefined && topPool[0]) {
+    const topMethod = topPool[0].method;
+    if (
+      normalizeRoutePattern(topMethod.route) === queryNormRoute &&
+      topMethod.httpMethod.toUpperCase() === queryHttpVerb
+    ) {
+      return `// Search match for '${rawQuery}': client.${topMethod.path}\n${types(schema, topMethod.path)}`;
+    }
   }
   const byGroup = new Map<string, { maxScore: number; methods: MethodSchema[] }>();
   for (const { method, score } of topPool) {
@@ -641,7 +697,26 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
  * - `types(schema, "dns.records.RecordSettings")` -> 1-level `RecordSettings` model declaration
  */
 export function types(schema: ApiSchema, rawSymbol?: string): string {
-  const trimmed = (rawSymbol ?? '').trim().replace(/^client\.?/, '');
+  const cleaned = (rawSymbol ?? '')
+    .trim()
+    .replace(/^await\s+/, '')
+    .replace(/^client\.?/, '')
+    .replace(/\(.*\)$/, '')
+    .replace(/\.Client$/, '')
+    .trim();
+  const camelized = cleaned
+    .split('.')
+    .map((seg) => seg.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase()))
+    .join('.');
+  const trimmed =
+    cleaned !== '' &&
+    !schema.groups[cleaned] &&
+    !schema.models[cleaned] &&
+    (schema.groups[camelized] !== undefined ||
+      schema.models[camelized] !== undefined ||
+      (camelized.includes('.') && schema.groups[camelized.slice(0, camelized.lastIndexOf('.'))] !== undefined))
+      ? camelized
+      : cleaned;
 
   // 1. Root Client view
   if (trimmed === '' || trimmed === 'Client') {

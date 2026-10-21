@@ -736,4 +736,19 @@ describe('Progressive Type-Feedback MCP runtime', () => {
       assert.doesNotMatch(errPlan.typeDefinition ?? '', /export interface AppRequest \{/);
     }
   });
+
+  test('types() normalizes .Client / () / snake_case symbols, matches HTTP verb + route, and scopes suggestions to parent group', () => {
+    const fromClientSuffix = types(schema, 'dns.records.Client');
+    assert.match(fromClientSuffix, /export namespace dns\.records \{/);
+
+    const fromCallExpr = types(schema, 'await client.dns.records.create()');
+    assert.match(fromCallExpr, /\/\/ Method: client\.dns\.records\.create/);
+
+    const fromVerbRoute = types(schema, 'POST /zones/{zoneId}/dns_records');
+    assert.match(fromVerbRoute, /\/\/ Method: client\.dns\.records\.create/);
+    assert.doesNotMatch(fromVerbRoute, /list\(request: ListRequest/);
+
+    const scopedErr = types(schema, 'dns.records.nonexistent');
+    assert.match(scopedErr, /Did you mean: 'dns\.records\.create'/);
+  });
 });
