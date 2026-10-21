@@ -7,7 +7,6 @@ import {
   plan,
   search,
   TypeFeedbackError,
-  types,
   wrapClient,
 } from '../../../mcp/runtime.js';
 const schema: ApiSchema = {
@@ -365,20 +364,20 @@ function makeFakeClient() {
 }
 
 describe('Progressive Type-Feedback MCP runtime', () => {
-  test('types() at root renders 1-level top namespaces without dumping nested methods', () => {
-    const out = types(schema);
+  test('search() at root renders 1-level top namespaces without dumping nested methods', () => {
+    const out = search(schema);
     assert.match(out, /export interface Client \{/);
     assert.match(out, /readonly dns: dns\.Client;/);
     assert.match(out, /readonly zones: zones\.Client;/);
     assert.doesNotMatch(out, /CreateRequest/);
   });
 
-  test('types() on namespace renders 1-level sub-groups and method signatures', () => {
-    const dnsOut = types(schema, 'dns');
+  test('search() on namespace renders 1-level sub-groups and method signatures', () => {
+    const dnsOut = search(schema, 'dns');
     assert.match(dnsOut, /export namespace dns \{/);
     assert.match(dnsOut, /readonly records: dns\.records\.Client;/);
 
-    const recordsOut = types(schema, 'dns.records');
+    const recordsOut = search(schema, 'dns.records');
     assert.match(recordsOut, /export namespace dns\.records \{/);
     assert.match(recordsOut, /create\(request: CreateRequest, options\?: RequestOptions\): Promise<CreateResponse>;/);
     assert.match(recordsOut, /list\(request: ListRequest, options\?: RequestOptions\): Promise<ListResponse>;/);
@@ -386,28 +385,28 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.doesNotMatch(recordsOut, /flattenCname/);
   });
 
-  test('types() on method renders 1-level request/response types and keeps nested models nominal', () => {
-    const createOut = types(schema, 'dns.records.create');
+  test('search() on method renders 1-level request/response types and keeps nested models nominal', () => {
+    const createOut = search(schema, 'dns.records.create');
     assert.match(createOut, /export interface CreateRequest \{/);
     assert.match(createOut, /zoneId: string; \/\/ path param/);
     assert.match(createOut, /type: 'A' \| 'AAAA' \| 'CNAME';/);
     assert.match(createOut, /settings\?: dns\.records\.RecordSettings;/);
     // RecordSettings fields are nominal until inspected
     assert.doesNotMatch(createOut, /flattenCname/);
-    assert.match(createOut, /Referenced models \(use types\("<model>"\) to inspect\): .*dns\.records\.RecordSettings/);
+    assert.match(createOut, /Referenced models \(use search\("<model>"\) to inspect\): .*dns\.records\.RecordSettings/);
   });
 
-  test('types() on model (qualified or unqualified) expands its 1-level fields', () => {
-    const byFull = types(schema, 'dns.records.RecordSettings');
-    const byShort = types(schema, 'RecordSettings');
+  test('search() on model (qualified or unqualified) expands its 1-level fields', () => {
+    const byFull = search(schema, 'dns.records.RecordSettings');
+    const byShort = search(schema, 'RecordSettings');
     assert.equal(byFull, byShort);
     assert.match(byFull, /export interface RecordSettings \{/);
     assert.match(byFull, /ipv4Only\?: boolean;/);
     assert.match(byFull, /flattenCname\?: boolean;/);
   });
 
-  test('types() on unknown symbol returns compiler-style error and fuzzy suggestions', () => {
-    const unknownMember = types(schema, 'dns.records.creat');
+  test('search() on unknown symbol returns compiler-style error and fuzzy suggestions', () => {
+    const unknownMember = search(schema, 'dns.records.creat');
     assert.match(unknownMember, /TS2339: Symbol 'dns\.records\.creat' does not exist on 'dns\.records'\./);
     assert.match(unknownMember, /Did you mean: 'dns\.records\.create'/);
   });
@@ -508,18 +507,18 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.match(String(searchRes), /export interface RecordSettings/);
     assert.equal(mcp.search('create buckets for organization'), search(schema, 'create buckets for organization'));
     assert.match(mcp.search('create buckets for organization'), /client\.storage\.buckets\.create/);
-    assert.ok(mcp.resources.some((r) => r.uri === 'forge://types' && r.name === 'client'));
+    assert.ok(mcp.resources.some((r) => r.uri === 'forge://sdk' && r.name === 'client'));
     assert.ok(
-      mcp.resources.some((r) => r.uri === 'forge://types/dns.records' && r.mimeType === 'application/typescript'),
+      mcp.resources.some((r) => r.uri === 'forge://sdk/dns.records' && r.mimeType === 'application/typescript'),
     );
-    assert.equal(mcp.resourceTemplates[0]?.uriTemplate, 'forge://types/{symbol}');
+    assert.equal(mcp.resourceTemplates[0]?.uriTemplate, 'forge://sdk/{query}');
 
-    const groupResource = mcp.readResource('forge://types/dns.records');
-    assert.equal(groupResource.uri, 'forge://types/dns.records');
+    const groupResource = mcp.readResource('forge://sdk/dns.records');
+    assert.equal(groupResource.uri, 'forge://sdk/dns.records');
     assert.equal(groupResource.mimeType, 'application/typescript');
     assert.match(groupResource.text, /export namespace dns\.records \{/);
 
-    const slashResource = mcp.readResource('forge://types/dns/records/create');
+    const slashResource = mcp.readResource('forge://sdk/dns/records/create');
     assert.match(slashResource.text, /\/\/ Method: client\.dns\.records\.create/);
 
     const wrapped = wrapClient(client, schema);
@@ -621,12 +620,12 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     }
   });
 
-  test('types() supports keyword and route search when the agent only has a search term', () => {
-    const byKeyword = types(schema, 'create bucket');
+  test('search() supports keyword and route search when the agent only has a search term', () => {
+    const byKeyword = search(schema, 'create bucket');
     assert.match(byKeyword, /client\.storage\.buckets\.create/);
     assert.match(byKeyword, /export interface CreateRequest \{/);
 
-    const byMultiMatch = types(schema, 'dns records');
+    const byMultiMatch = search(schema, 'dns records');
     assert.match(byMultiMatch, /Search matches for 'dns records'/);
     assert.match(byMultiMatch, /create\(request: CreateRequest/);
     assert.match(byMultiMatch, /list\(request: ListRequest/);
@@ -736,7 +735,7 @@ describe('Progressive Type-Feedback MCP runtime', () => {
       },
     };
 
-    const dts = types(unionSchema, 'apps.create');
+    const dts = search(unionSchema, 'apps.create');
     assert.match(dts, /export interface CreateRequest \{[\s\S]*accountId: string;[\s\S]*sessionDuration\?: string;/);
     assert.doesNotMatch(dts, /export interface AppRequest \{/);
 
@@ -753,20 +752,19 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     }
   });
 
-  test('types() normalizes .Client / () / snake_case symbols, matches HTTP verb + route, and scopes suggestions to parent group', () => {
-    const fromClientSuffix = types(schema, 'dns.records.Client');
+  test('search() normalizes .Client / () / snake_case symbols, matches HTTP verb + route, and scopes suggestions to parent group', () => {
+    const fromClientSuffix = search(schema, 'dns.records.Client');
     assert.match(fromClientSuffix, /export namespace dns\.records \{/);
 
-    const fromCallExpr = types(schema, 'await client.dns.records.create()');
+    const fromCallExpr = search(schema, 'await client.dns.records.create()');
     assert.match(fromCallExpr, /\/\/ Method: client\.dns\.records\.create/);
 
-    const fromVerbRoute = types(schema, 'POST /zones/{zoneId}/dns_records');
+    const fromVerbRoute = search(schema, 'POST /zones/{zoneId}/dns_records');
     assert.match(fromVerbRoute, /\/\/ Method: client\.dns\.records\.create/);
     assert.doesNotMatch(fromVerbRoute, /list\(request: ListRequest/);
 
-    const scopedErr = types(schema, 'dns.records.nonexistent');
+    const scopedErr = search(schema, 'dns.records.nonexistent');
     assert.match(scopedErr, /Did you mean: 'dns\.records\.create'/);
-
     const exactStem = search(schema, 'list dns records');
     assert.match(exactStem, /\/\/ Search match for 'list dns records': client\.dns\.records\.list/);
   });

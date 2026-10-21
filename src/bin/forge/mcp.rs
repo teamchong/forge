@@ -3,7 +3,7 @@
 //!
 //! Instead of dumping thousands of flattened tool schemas into the prompt or
 //! searching raw OpenAPI JSON paths, agents inspect the SDK's hierarchical
-//! TypeScript definitions one level at a time with `types(symbol)` (or by
+//! TypeScript definitions one level at a time with `search(query)` (or by
 //! evaluating `client.<group>.<method>` inside `execute(code)`) and execute
 //! typed SDK code with `execute(code)`, receiving compiler-style diagnostics
 //! with the relevant `.d.ts` type definition attached on any mistake.
@@ -56,7 +56,6 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let execute_fn = mcp_mod.ident("execute");
     let plan_fn = mcp_mod.ident("plan");
     let search_fn = mcp_mod.ident("search");
-    let types_fn = mcp_mod.ident("types");
     let list_resources_fn = mcp_mod.ident("listResources");
     let list_templates_fn = mcp_mod.ident("listResourceTemplates");
     let read_resource_fn = mcp_mod.ident("readResource");
@@ -73,8 +72,6 @@ fn mcp_entry_file(schema_json: &str) -> File {
         plan_fn,
         ", ",
         search_fn,
-        ", ",
-        types_fn,
         ", ",
         list_resources_fn,
         ", ",

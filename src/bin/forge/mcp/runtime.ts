@@ -692,7 +692,7 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
     }
   }
   if (exactMethodMatches.length === 1 && exactMethodMatches[0]) {
-    return `// Search match for '${rawQuery}': client.${exactMethodMatches[0].path}\n${types(schema, exactMethodMatches[0].path)}`;
+    return `// Search match for '${rawQuery}': client.${exactMethodMatches[0].path}\n${search(schema, exactMethodMatches[0].path)}`;
   }
   if (scoredMethods.length === 0) {
     return undefined;
@@ -702,7 +702,7 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
   const bestMatches = scoredMethods.filter((m) => m.matchedCount === maxMatched);
   const topPool = maxMatched >= 2 && bestMatches.length > 0 ? bestMatches : scoredMethods;
   if (topPool.length === 1 && topPool[0]) {
-    return `// Search match for '${rawQuery}': client.${topPool[0].method.path}\n${types(schema, topPool[0].method.path)}`;
+    return `// Search match for '${rawQuery}': client.${topPool[0].method.path}\n${search(schema, topPool[0].method.path)}`;
   }
   if (queryNormRoute !== undefined && queryHttpVerb !== undefined && topPool[0]) {
     const topMethod = topPool[0].method;
@@ -710,7 +710,7 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
       normalizeRoutePattern(topMethod.route) === queryNormRoute &&
       topMethod.httpMethod.toUpperCase() === queryHttpVerb
     ) {
-      return `// Search match for '${rawQuery}': client.${topMethod.path}\n${types(schema, topMethod.path)}`;
+      return `// Search match for '${rawQuery}': client.${topMethod.path}\n${search(schema, topMethod.path)}`;
     }
   }
   const byGroup = new Map<string, { maxScore: number; methods: MethodSchema[] }>();
@@ -734,7 +734,7 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
       (a, b) => b[1].maxScore - a[1].maxScore || b[1].methods.length - a[1].methods.length || a[0].localeCompare(b[0]),
     );
     const lines: string[] = [
-      `// Search matches for '${rawQuery}' (${topPool.length} matching methods across ${byGroup.size} groups — call types("<group>") or types("<group>.<method>") to drill down):`,
+      `// Search matches for '${rawQuery}' (${topPool.length} matching methods across ${byGroup.size} groups — call search("<group>") or search("<group>.<method>") to drill down):`,
       'export interface SearchMatches {',
     ];
     for (const [gPath, info] of sortedGroups.slice(0, 30)) {
@@ -757,7 +757,7 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
 
   const top = topPool.slice(0, 12);
   const lines: string[] = [
-    `// Search matches for '${rawQuery}' (${topPool.length} matching methods; call types("<methodPath>") for full request/response types):`,
+    `// Search matches for '${rawQuery}' (${topPool.length} matching methods; call search("<methodPath>") for full request/response types):`,
   ];
   const topByGroup = new Map<string, MethodSchema[]>();
   for (const { method } of top) {
@@ -781,15 +781,16 @@ function searchByKeywords(schema: ApiSchema, rawQuery: string): string | undefin
 }
 
 /**
- * Returns a progressive 1-level `.d.ts` TypeScript & JSDoc definition for a symbol path in the SDK.
+ * Searches or inspects a progressive 1-level `.d.ts` TypeScript & JSDoc definition in the SDK.
  *
  * Examples:
- * - `types(schema)` or `types(schema, "client")` -> top-level `Client` namespaces
- * - `types(schema, "dns.records")` -> 1-level `dns.records.Client` methods & sub-groups
- * - `types(schema, "dns.records.create")` -> method signature + 1-level `CreateRequest` & `CreateResponse`
- * - `types(schema, "dns.records.RecordSettings")` -> 1-level `RecordSettings` model declaration
+ * - `search(schema)` or `search(schema, "client")` -> top-level `Client` namespaces
+ * - `search(schema, "dns.records")` -> 1-level `dns.records.Client` methods & sub-groups
+ * - `search(schema, "dns.records.create")` -> method signature + 1-level `CreateRequest` & `CreateResponse`
+ * - `search(schema, "dns.records.RecordSettings")` -> 1-level `RecordSettings` model declaration
+ * - `search(schema, "purge cache")` -> ranked keyword/route search across all SDK endpoints
  */
-export function types(schema: ApiSchema, rawSymbol?: string): string {
+export function search(schema: ApiSchema, rawSymbol?: string): string {
   const cleaned = (rawSymbol ?? '')
     .trim()
     .replace(/^await\s+/, '')
@@ -819,7 +820,9 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
     const totalModels = Object.keys(schema.models).length;
     lines.push(`// API Version: ${schema.version}${schema.baseUrl ? ` | Base URL: ${schema.baseUrl}` : ''}`);
     lines.push(`// ${totalGroups} groups, ${totalMethods} methods, ${totalModels} models`);
-    lines.push('// Tip: inspect `client.<group>` or call `types("<group>.<method>")` to drill down 1 level at a time.');
+    lines.push(
+      '// Tip: inspect `client.<group>` or call `search("<group>.<method>")` to drill down 1 level at a time.',
+    );
     const rootSummary = firstSummaryLine(schema.description);
     if (rootSummary) {
       lines.push(formatJsDoc(rootSummary, false, '').trimEnd());
@@ -898,7 +901,7 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
     refs.delete(exactModel.path);
     const footer =
       refs.size > 0
-        ? `\n\n// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
+        ? `\n\n// Referenced models (use search("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
         : '';
     return `// Model: ${exactModel.path} (OpenAPI schema '${exactModel.schemaName}')\n${decl}${footer}`;
   }
@@ -969,7 +972,7 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
           }
         }
         if (refs.size > 0) {
-          blocks.push(`// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`);
+          blocks.push(`// Referenced models (use search("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`);
         }
         return blocks.join('\n\n');
       }
@@ -986,7 +989,7 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
         }
         const footer =
           refs.size > 0
-            ? `\n\n// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
+            ? `\n\n// Referenced models (use search("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
             : '';
         return `// Request type for client.${reqMethod.path}\n${reqDecl}${footer}`;
       }
@@ -998,7 +1001,7 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
         collectReferencedModels(schema, respMethod.responseType, refs);
         const footer =
           refs.size > 0
-            ? `\n\n// Referenced models (use types("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
+            ? `\n\n// Referenced models (use search("<model>") to inspect): ${Array.from(refs).sort().join(', ')}`
             : '';
         return `// Response type for client.${respMethod.path}\n${respDecl}${footer}`;
       }
@@ -1008,19 +1011,19 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
   // 5. Unqualified model name lookup (e.g. "RecordSettings" when unique or matching models)
   const matchingModels = Object.values(schema.models).filter((m) => m.name === trimmed || m.schemaName === trimmed);
   if (matchingModels.length === 1) {
-    return types(schema, matchingModels[0]!.path);
+    return search(schema, matchingModels[0]!.path);
   }
   if (matchingModels.length > 1) {
     return (
       `Multiple models match '${trimmed}': ${matchingModels.map((m) => m.path).join(', ')}.\n\n` +
-      types(schema, matchingModels[0]!.path)
+      search(schema, matchingModels[0]!.path)
     );
   }
   // 6. Suffix match on group or method path (e.g. "access.applications" -> "zeroTrust.access.applications")
   const lowerSuffix = `.${trimmed.toLowerCase()}`;
   const suffixGroups = Object.keys(schema.groups).filter((g) => g.toLowerCase().endsWith(lowerSuffix));
   if (suffixGroups.length === 1 && suffixGroups[0]) {
-    return `// Note: '${trimmed}' is located at 'client.${suffixGroups[0]}'\n${types(schema, suffixGroups[0])}`;
+    return `// Note: '${trimmed}' is located at 'client.${suffixGroups[0]}'\n${search(schema, suffixGroups[0])}`;
   }
   const suffixMethods: string[] = [];
   for (const g of Object.values(schema.groups)) {
@@ -1031,7 +1034,7 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
     }
   }
   if (suffixMethods.length === 1 && suffixMethods[0]) {
-    return `// Note: '${trimmed}' is located at 'client.${suffixMethods[0]}'\n${types(schema, suffixMethods[0])}`;
+    return `// Note: '${trimmed}' is located at 'client.${suffixMethods[0]}'\n${search(schema, suffixMethods[0])}`;
   }
 
   // 7. Keyword / route / summary search when symbol is not an exact path (e.g. "kv", "purge cache", "/storage/kv")
@@ -1048,7 +1051,7 @@ export function types(schema: ApiSchema, rawSymbol?: string): string {
   if (lastDot !== -1) {
     const parentPath = trimmed.slice(0, lastDot);
     if (schema.groups[parentPath]) {
-      return `TS2339: Symbol '${trimmed}' does not exist on '${parentPath}'.${suggestionText}\n\n${types(schema, parentPath)}`;
+      return `TS2339: Symbol '${trimmed}' does not exist on '${parentPath}'.${suggestionText}\n\n${search(schema, parentPath)}`;
     }
   }
   return `TS2304: Cannot find symbol '${trimmed}'.${suggestionText}`;
@@ -1666,7 +1669,7 @@ export function validateMethodCall(schema: ApiSchema, method: MethodSchema, args
   }
 
   if (issues.length > 0) {
-    const definitions: string[] = [types(schema, method.path)];
+    const definitions: string[] = [search(schema, method.path)];
     const shownModels = new Set<string>();
     if (
       method.requestFlat &&
@@ -1678,7 +1681,7 @@ export function validateMethodCall(schema: ApiSchema, method: MethodSchema, args
     for (const issue of issues) {
       if (issue.symbol && !shownModels.has(issue.symbol) && schema.models[issue.symbol]) {
         shownModels.add(issue.symbol);
-        definitions.push(types(schema, issue.symbol));
+        definitions.push(search(schema, issue.symbol));
       }
     }
     throw new TypeFeedbackError(issues, definitions.join('\n\n'));
@@ -1847,7 +1850,7 @@ export function wrapClient<T extends object>(
             : available.length > 0
               ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
               : '';
-        const defBody = suffixGroup ? types(schema, suffixGroup) : (keywordMatches ?? types(schema, groupPath));
+        const defBody = suffixGroup ? search(schema, suffixGroup) : (keywordMatches ?? search(schema, groupPath));
         throw new TypeFeedbackError(
           [
             {
@@ -1989,7 +1992,7 @@ function prepareCodeBody(code: string): string {
   if (!stmtKeywordRe.test(withoutTrailingSemicolon)) {
     const candidate = `return (\n${withoutTrailingSemicolon}\n);`;
     try {
-      new AsyncFunction('client', 'search', 'types', candidate);
+      new AsyncFunction('client', 'search', candidate);
       return candidate;
     } catch {
       // Multi-statement body; fall through
@@ -2007,7 +2010,7 @@ function prepareCodeBody(code: string): string {
     }
     const candidate = `${prefix};\nreturn (\n${suffix}\n);`;
     try {
-      new AsyncFunction('client', 'search', 'types', candidate);
+      new AsyncFunction('client', 'search', candidate);
       return candidate;
     } catch {
       continue;
@@ -2036,26 +2039,26 @@ function isCallLogReplaySafe(callLog: readonly CallLogEntry[]): boolean {
 export async function execute<T extends object>(
   client: T,
   schema: ApiSchema,
-  codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+  codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
   options?: ExecuteOptions | undefined,
 ): Promise<ExecuteResult> {
   const callLog: CallLogEntry[] = [];
   const checkedClient = wrapClient(client, schema, '', { options, callLog });
-  const typesFn = (symbol?: string) => types(schema, symbol);
+  const searchFn = (query?: string) => search(schema, query);
   try {
     let value: unknown;
     if (typeof codeOrFn === 'function') {
-      value = await codeOrFn(checkedClient, typesFn);
+      value = await codeOrFn(checkedClient, searchFn);
     } else {
-      const runner = new AsyncFunction('client', 'search', 'types', prepareCodeBody(codeOrFn));
-      value = await runner(checkedClient, typesFn, typesFn);
+      const runner = new AsyncFunction('client', 'search', prepareCodeBody(codeOrFn));
+      value = await runner(checkedClient, searchFn);
     }
     if (typeof value === 'function' && getSymbolPath(value) === undefined) {
-      value = await (value as (c: T, t: (s?: string) => string) => unknown)(checkedClient, typesFn);
+      value = await (value as (c: T, s: (q?: string) => string) => unknown)(checkedClient, searchFn);
     }
     const inspectedSymbol = getSymbolPath(value);
     if (inspectedSymbol !== undefined) {
-      const def = types(schema, inspectedSymbol);
+      const def = search(schema, inspectedSymbol);
       return { ok: true, result: def, typeDefinition: def };
     }
     return { ok: true, result: value };
@@ -2225,7 +2228,7 @@ function buildCallPlan(
 export async function plan<T extends object>(
   client: T,
   schema: ApiSchema,
-  codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+  codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
   options?: ExecuteOptions | undefined,
 ): Promise<CallPlan> {
   const checkedClient = wrapClient(client, schema, '', {
@@ -2234,17 +2237,17 @@ export async function plan<T extends object>(
       throw new PlannedCallSignal(buildCallPlan(schema, methodSchema, reqArg, options));
     },
   });
-  const typesFn = (symbol?: string) => types(schema, symbol);
+  const searchFn = (query?: string) => search(schema, query);
   try {
     let value: unknown;
     if (typeof codeOrFn === 'function') {
-      value = await codeOrFn(checkedClient, typesFn);
+      value = await codeOrFn(checkedClient, searchFn);
     } else {
-      const runner = new AsyncFunction('client', 'search', 'types', prepareCodeBody(codeOrFn));
-      value = await runner(checkedClient, typesFn, typesFn);
+      const runner = new AsyncFunction('client', 'search', prepareCodeBody(codeOrFn));
+      value = await runner(checkedClient, searchFn);
     }
     if (typeof value === 'function' && getSymbolPath(value) === undefined) {
-      await (value as (c: T, t: (s?: string) => string) => unknown)(checkedClient, typesFn);
+      await (value as (c: T, s: (q?: string) => string) => unknown)(checkedClient, searchFn);
     }
     return {
       kind: 'invalid',
@@ -2299,7 +2302,7 @@ export interface McpResourceContent {
 
 /**
  * Lists MCP resources (`resources/list`) for the SDK's groups.
- * - Includes `forge://types` for the top-level `Client` index and `forge://types/<group>` for every top-level SDK group.
+ * - Includes `forge://sdk` for the top-level `Client` index and `forge://sdk/<group>` for every top-level SDK group.
  * - When `options.allGroups` is true (or total groups <= 64), also lists nested subgroups.
  */
 export function listResources(
@@ -2309,7 +2312,7 @@ export function listResources(
   const rootSummary = firstSummaryLine(schema.description);
   const out: McpResource[] = [
     {
-      uri: 'forge://types',
+      uri: 'forge://sdk',
       name: 'client',
       description: rootSummary ? `${rootSummary} (top-level SDK index)` : 'Top-level SDK client index (.d.ts)',
       mimeType: 'application/typescript',
@@ -2329,7 +2332,7 @@ export function listResources(
         : `${methodCount} method${methodCount === 1 ? '' : 's'}`;
     const summary = firstSummaryLine(group.description);
     out.push({
-      uri: `forge://types/${groupPath}`,
+      uri: `forge://sdk/${groupPath}`,
       name: `client.${groupPath}`,
       description: summary ? `${summary} (${childPreview})` : childPreview,
       mimeType: 'application/typescript',
@@ -2344,22 +2347,22 @@ export function listResources(
 export function listResourceTemplates(): McpResourceTemplate[] {
   return [
     {
-      uriTemplate: 'forge://types/{symbol}',
+      uriTemplate: 'forge://sdk/{query}',
       name: 'SDK Type Definition (.d.ts)',
       description:
-        'Progressive 1-level TypeScript (.d.ts) declaration for any SDK group (e.g. forge://types/dns.records), method (e.g. forge://types/dns.records.create), model (e.g. forge://types/dns.records.RecordSettings), or search query.',
+        'Progressive 1-level TypeScript (.d.ts) declaration for any SDK group (e.g. forge://sdk/dns.records), method (e.g. forge://sdk/dns.records.create), model (e.g. forge://sdk/dns.records.RecordSettings), or search query.',
       mimeType: 'application/typescript',
     },
   ];
 }
 
 /**
- * Reads an MCP resource URI (`resources/read`, e.g. `forge://types`, `forge://types/dns.records`, `forge://types/dns/records/create`)
+ * Reads an MCP resource URI (`resources/read`, e.g. `forge://sdk`, `forge://sdk/dns.records`, `forge://sdk/dns/records/create`)
  * and returns its 1-level `.d.ts` TypeScript definition.
  */
 export function readResource(schema: ApiSchema, uri: string): McpResourceContent {
   const trimmed = uri.trim();
-  let rawSymbol = trimmed.replace(/^forge:\/\/(?:types|client)\/?/i, '');
+  let rawSymbol = trimmed.replace(/^forge:\/\/(?:sdk|client)\/?/i, '');
   try {
     rawSymbol = decodeURIComponent(rawSymbol);
   } catch {
@@ -2377,32 +2380,27 @@ export function readResource(schema: ApiSchema, uri: string): McpResourceContent
   }
   const canonicalUri =
     rawSymbol === '' || rawSymbol === 'client' || rawSymbol === 'Client'
-      ? 'forge://types'
+      ? 'forge://sdk'
       : trimmed.startsWith('forge://')
         ? trimmed
-        : `forge://types/${rawSymbol}`;
+        : `forge://sdk/${rawSymbol}`;
   return {
     uri: canonicalUri,
     mimeType: 'application/typescript',
-    text: types(schema, rawSymbol === '' ? undefined : rawSymbol),
+    text: search(schema, rawSymbol === '' ? undefined : rawSymbol),
   };
-}
-
-export function search(schema: ApiSchema, query?: string): string {
-  return types(schema, query);
 }
 
 export interface ProgressiveMcp<T extends object> {
   readonly schema: ApiSchema;
   readonly client: T;
   search(query?: string): string;
-  types(symbol?: string): string;
   execute(
-    codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+    codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
     options?: ExecuteOptions | undefined,
   ): Promise<ExecuteResult>;
   plan(
-    codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
+    codeOrFn: string | ((client: T, searchFn: (query?: string) => string) => unknown | Promise<unknown>),
     options?: ExecuteOptions | undefined,
   ): Promise<CallPlan>;
   readonly resources: readonly McpResource[];
@@ -2419,13 +2417,9 @@ export interface ProgressiveMcp<T extends object> {
             readonly type: 'string';
             readonly description: string;
           };
-          readonly symbol: {
-            readonly type: 'string';
-            readonly description: string;
-          };
         };
       };
-      handler(args?: { readonly query?: string; readonly symbol?: string }): string;
+      handler(args?: { readonly query?: string }): string;
     },
     {
       readonly name: 'execute';
@@ -2467,10 +2461,7 @@ export function createProgressiveMcp<T extends object>(
     schema,
     client: checkedClient,
     search(query?: string): string {
-      return types(schema, query);
-    },
-    types(symbol?: string): string {
-      return types(schema, symbol);
+      return search(schema, query);
     },
     execute(codeOrFn, options): Promise<ExecuteResult> {
       return execute(client, schema, codeOrFn, options ?? defaultOptions);
@@ -2496,21 +2487,16 @@ export function createProgressiveMcp<T extends object>(
               description:
                 'Search query, HTTP route, or dot-separated SDK symbol path (e.g. "purge cache", "kv", "dns.records", "dns.records.create", or omit for top-level index).',
             },
-            symbol: {
-              type: 'string',
-              description:
-                'Alias for `query`: dot-separated SDK symbol path or search term (e.g. "dns.records.create").',
-            },
           },
         },
-        handler(args?: { readonly query?: string; readonly symbol?: string }): string {
-          return types(schema, args?.query ?? args?.symbol);
+        handler(args?: { readonly query?: string }): string {
+          return search(schema, args?.query);
         },
       },
       {
         name: 'execute',
         description:
-          'Execute TypeScript/JavaScript against the generated `client` SDK instance. Returning `client.<group>` or `client.<group>.<method>` inspects its .d.ts types; calling `await client.<group>.<method>(...)` validates arguments before making any HTTP call and returns compiler diagnostics + 1-level .d.ts definitions on any type error.',
+          'Execute TypeScript/JavaScript against the generated `client` SDK instance. Returning `client.<group>` or `client.<group>.<method>` inspects its .d.ts signature; calling `await client.<group>.<method>(...)` validates arguments before making any HTTP call and returns compiler diagnostics + 1-level .d.ts definitions on any type error.',
         inputSchema: {
           type: 'object',
           required: ['code'],
