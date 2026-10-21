@@ -56,6 +56,9 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let execute_fn = mcp_mod.ident("execute");
     let plan_fn = mcp_mod.ident("plan");
     let types_fn = mcp_mod.ident("types");
+    let list_resources_fn = mcp_mod.ident("listResources");
+    let list_templates_fn = mcp_mod.ident("listResourceTemplates");
+    let read_resource_fn = mcp_mod.ident("readResource");
     let progressive_ty = mcp_mod.ident("ProgressiveMcp").ty();
     let type_err = mcp_mod.ident("TypeFeedbackError");
 
@@ -70,6 +73,12 @@ fn mcp_entry_file(schema_json: &str) -> File {
         ", ",
         types_fn,
         ", ",
+        list_resources_fn,
+        ", ",
+        list_templates_fn,
+        ", ",
+        read_resource_fn,
+        ", ",
         type_err,
         " };"
     );
@@ -83,6 +92,12 @@ fn mcp_entry_file(schema_json: &str) -> File {
         mcp_mod.ident("ExecuteOptions").ty(),
         ", ",
         mcp_mod.ident("ExecuteResult").ty(),
+        ", ",
+        mcp_mod.ident("McpResource").ty(),
+        ", ",
+        mcp_mod.ident("McpResourceContent").ty(),
+        ", ",
+        mcp_mod.ident("McpResourceTemplate").ty(),
         ", ",
         progressive_ty,
         ", ",

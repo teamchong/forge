@@ -2149,6 +2149,117 @@ export async function plan<T extends object>(
   }
 }
 
+export interface McpResource {
+  readonly uri: string;
+  readonly name: string;
+  readonly description?: string | undefined;
+  readonly mimeType: 'application/typescript';
+}
+
+export interface McpResourceTemplate {
+  readonly uriTemplate: string;
+  readonly name: string;
+  readonly description: string;
+  readonly mimeType: 'application/typescript';
+}
+
+export interface McpResourceContent {
+  readonly uri: string;
+  readonly mimeType: 'application/typescript';
+  readonly text: string;
+}
+
+/**
+ * Lists MCP resources (`resources/list`) for the SDK's groups.
+ * - Includes `forge://types` for the top-level `Client` index and `forge://types/<group>` for every top-level SDK group.
+ * - When `options.allGroups` is true (or total groups <= 64), also lists nested subgroups.
+ */
+export function listResources(
+  schema: ApiSchema,
+  options?: { readonly allGroups?: boolean | undefined } | undefined,
+): McpResource[] {
+  const rootSummary = firstSummaryLine(schema.description);
+  const out: McpResource[] = [
+    {
+      uri: 'forge://types',
+      name: 'client',
+      description: rootSummary ? `${rootSummary} (top-level SDK index)` : 'Top-level SDK client index (.d.ts)',
+      mimeType: 'application/typescript',
+    },
+  ];
+  const groupKeys =
+    (options?.allGroups ?? Object.keys(schema.groups).length <= 64) ? Object.keys(schema.groups) : schema.rootChildren;
+  for (const groupPath of groupKeys) {
+    const group = schema.groups[groupPath];
+    if (!group) {
+      continue;
+    }
+    const methodCount = countGroupMethods(schema, groupPath);
+    const childPreview =
+      group.children.length > 0
+        ? `subgroups: ${group.children.slice(0, 6).join(', ')}${group.children.length > 6 ? `, +${group.children.length - 6} more` : ''}; ${methodCount} methods`
+        : `${methodCount} method${methodCount === 1 ? '' : 's'}`;
+    const summary = firstSummaryLine(group.description);
+    out.push({
+      uri: `forge://types/${groupPath}`,
+      name: `client.${groupPath}`,
+      description: summary ? `${summary} (${childPreview})` : childPreview,
+      mimeType: 'application/typescript',
+    });
+  }
+  return out;
+}
+
+/**
+ * Lists MCP resource templates (`resources/templates/list`) for drilling into any SDK symbol or search query.
+ */
+export function listResourceTemplates(): McpResourceTemplate[] {
+  return [
+    {
+      uriTemplate: 'forge://types/{symbol}',
+      name: 'SDK Type Definition (.d.ts)',
+      description:
+        'Progressive 1-level TypeScript (.d.ts) declaration for any SDK group (e.g. forge://types/dns.records), method (e.g. forge://types/dns.records.create), model (e.g. forge://types/dns.records.RecordSettings), or search query.',
+      mimeType: 'application/typescript',
+    },
+  ];
+}
+
+/**
+ * Reads an MCP resource URI (`resources/read`, e.g. `forge://types`, `forge://types/dns.records`, `forge://types/dns/records/create`)
+ * and returns its 1-level `.d.ts` TypeScript definition.
+ */
+export function readResource(schema: ApiSchema, uri: string): McpResourceContent {
+  const trimmed = uri.trim();
+  let rawSymbol = trimmed.replace(/^forge:\/\/(?:types|client)\/?/i, '');
+  try {
+    rawSymbol = decodeURIComponent(rawSymbol);
+  } catch {
+    // Keep rawSymbol if percent-decoding fails
+  }
+  if (
+    rawSymbol.includes('/') &&
+    !rawSymbol.includes(' ') &&
+    !schema.groups[rawSymbol] &&
+    (schema.groups[rawSymbol.replace(/\//g, '.')] !== undefined ||
+      schema.models[rawSymbol.replace(/\//g, '.')] !== undefined ||
+      schema.groups[rawSymbol.replace(/\//g, '.').slice(0, rawSymbol.lastIndexOf('/'))] !== undefined)
+  ) {
+    rawSymbol = rawSymbol.replace(/\//g, '.');
+  }
+  const canonicalUri =
+    rawSymbol === '' || rawSymbol === 'client' || rawSymbol === 'Client'
+      ? 'forge://types'
+      : trimmed.startsWith('forge://')
+        ? trimmed
+        : `forge://types/${rawSymbol}`;
+  return {
+    uri: canonicalUri,
+    mimeType: 'application/typescript',
+    text: types(schema, rawSymbol === '' ? undefined : rawSymbol),
+  };
+}
+
 export interface ProgressiveMcp<T extends object> {
   readonly schema: ApiSchema;
   readonly client: T;
@@ -2161,6 +2272,9 @@ export interface ProgressiveMcp<T extends object> {
     codeOrFn: string | ((client: T, typesFn: (symbol?: string) => string) => unknown | Promise<unknown>),
     options?: ExecuteOptions | undefined,
   ): Promise<CallPlan>;
+  readonly resources: readonly McpResource[];
+  readonly resourceTemplates: readonly McpResourceTemplate[];
+  readResource(uri: string): McpResourceContent;
   readonly tools: readonly [
     {
       readonly name: 'types';
@@ -2210,6 +2324,8 @@ export function createProgressiveMcp<T extends object>(
   defaultOptions?: ExecuteOptions | undefined,
 ): ProgressiveMcp<T> {
   const checkedClient = wrapClient(client, schema, '', { options: defaultOptions });
+  const resources = listResources(schema);
+  const resourceTemplates = listResourceTemplates();
   return {
     schema,
     client: checkedClient,
@@ -2221,6 +2337,11 @@ export function createProgressiveMcp<T extends object>(
     },
     plan(codeOrFn, options): Promise<CallPlan> {
       return plan(client, schema, codeOrFn, options ?? defaultOptions);
+    },
+    resources,
+    resourceTemplates,
+    readResource(uri: string): McpResourceContent {
+      return readResource(schema, uri);
     },
     tools: [
       {
