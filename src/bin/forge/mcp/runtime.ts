@@ -566,7 +566,7 @@ function matchByHttpRoute(schema: ApiSchema, rawQuery: string): string | undefin
 
 function renderMethodListDts(methods: readonly MethodSchema[], label: string): string {
   const lines: string[] = [
-    `// ${label} (${methods.length} matching methods - call dts("<methodPath>") for full request/response .d.ts):`,
+    `// ${label} (${methods.length} matching methods - search("<methodPath>") for full request/response .d.ts):`,
   ];
   const byGroup = new Map<string, MethodSchema[]>();
   for (const method of methods.slice(0, 25)) {
@@ -653,7 +653,7 @@ function extractSymbolFromItem(schema: ApiSchema, item: unknown): string | undef
 
 function formatSearchEvalResult(schema: ApiSchema, value: unknown): string {
   if (value === undefined || value === null) {
-    return '// 0 matches. Tip: filter `methods` (each has `{ path, group, name, httpMethod, route, summary, description }`), inspect `Object.keys(groups)`, or call `dts("<symbol>")`.';
+    return '// 0 matches. Tip: filter `methods` (each has `{ path, group, name, httpMethod, route, summary, description }`), inspect `Object.keys(groups)`, or pass a symbol path like `"dns.records.create"`.';
   }
   if (typeof value === 'string') {
     return resolveSymbolDts(schema, value) ?? value;
@@ -664,7 +664,7 @@ function formatSearchEvalResult(schema: ApiSchema, value: unknown): string {
   }
   if (Array.isArray(value)) {
     if (value.length === 0) {
-      return '// 0 matches. Tip: filter `methods` (each has `{ path, group, name, httpMethod, route, summary, description }`), inspect `Object.keys(groups)`, or call `dts("<symbol>")`.';
+      return '// 0 matches. Tip: filter `methods` (each has `{ path, group, name, httpMethod, route, summary, description }`), inspect `Object.keys(groups)`, or pass a symbol path like `"dns.records.create"`.';
     }
     if (value.every((item) => typeof item === 'string')) {
       const strItems = value as readonly string[];
@@ -700,7 +700,7 @@ function formatSearchEvalResult(schema: ApiSchema, value: unknown): string {
         })
         .join('\n');
       const more = symbols.length > 25 ? `\n  // ... +${symbols.length - 25} more` : '';
-      return `// ${symbols.length} matching symbols - call dts("<symbol>") to inspect:\nexport interface SearchMatches {\n${preview}${more}\n}`;
+      return `// ${symbols.length} matching symbols - search("<symbol>") to inspect:\nexport interface SearchMatches {\n${preview}${more}\n}`;
     }
     return JSON.stringify(value, null, 2);
   }
@@ -737,7 +737,6 @@ function cleanSymbolPath(schema: ApiSchema, rawSymbol?: string): string {
     .replace(/;+$/, '')
     .replace(/^await\s+/, '')
     .replace(/^return\s+/, '')
-    .replace(/^dts\s*\(\s*([^()]*?)\s*\)$/, '$1')
     .trim()
     .replace(/^['"`]+|['"`]+$/g, '')
     .replace(/^client\./, '')
@@ -837,27 +836,13 @@ export function filterSchema(
   return filtered;
 }
 
-/**
- * Renders a progressive 1-level `.d.ts` TypeScript & JSDoc definition for an SDK symbol,
- * method/group/model object, or array of matches.
- */
-export function dts(
-  schema: ApiSchema,
-  target?: unknown,
-  options?: SearchOptions | undefined,
-): string {
-  const activeSchema = filterSchema(schema, options?.include);
-  if (typeof target === 'string' || target === undefined || target === null) {
-    const rawSymbol = typeof target === 'string' ? target : '';
-    const resolved = resolveSymbolDts(activeSchema, rawSymbol);
-    if (resolved !== undefined) {
-      return resolved;
-    }
-    return renderUnknownSymbolDiagnostic(activeSchema, rawSymbol);
+function renderSymbolDts(schema: ApiSchema, rawSymbol?: string): string {
+  const resolved = resolveSymbolDts(schema, rawSymbol);
+  if (resolved !== undefined) {
+    return resolved;
   }
-  return formatSearchEvalResult(activeSchema, target);
+  return renderUnknownSymbolDiagnostic(schema, rawSymbol ?? '');
 }
-
 function resolveSymbolDts(schema: ApiSchema, rawSymbol?: string): string | undefined {
   const trimmed = cleanSymbolPath(schema, rawSymbol);
 
@@ -872,7 +857,7 @@ function resolveSymbolDts(schema: ApiSchema, rawSymbol?: string): string | undef
     );
     lines.push(`// ${totalGroups} groups, ${totalMethods} methods, ${totalModels} models`);
     lines.push(
-      '// Tip: call dts("<group>") or filter `methods` in search({ code }) to drill down 1 level at a time.',
+      '// Tip: search("<group>") or filter `methods` in search({ code }) to drill down 1 level at a time.',
     );
     const rootSummary = firstSummaryLine(schema.description);
     if (rootSummary) {
@@ -1127,8 +1112,8 @@ function renderUnknownSymbolDiagnostic(schema: ApiSchema, rawSymbol: string): st
  * sandbox without calling `new Function` / `new AsyncFunction` in the host isolate.
  *
  * @param code - The raw JavaScript expression or multi-statement snippet from the agent.
- * @param globals - Bound runtime globals (`{ schema, methods, groups, models, dts, client }` for `search`,
- *   or `{ client, search, dts, schema }` for `execute`).
+ * @param globals - Bound runtime globals (`{ schema, methods, groups, models, client }` for `search`,
+ *   or `{ client, search, schema }` for `execute`).
  * @param functionBody - Normalized function body with automatic `return (...)` wrapping on the trailing expression.
  */
 export type CodeEvaluator = (
@@ -1139,7 +1124,7 @@ export type CodeEvaluator = (
 
 export interface SearchOptions {
   /**
-   * Filter which SDK methods are exposed in `search()`, `dts()`, and `execute()`
+   * Filter which SDK methods are exposed in `search()` and `execute()`
    * (e.g. `(m) => !m.deprecated && m.httpMethod === 'GET'`, or checking `m.extensions`).
    */
   readonly include?: ((method: MethodSchema) => boolean) | undefined;
@@ -1147,7 +1132,7 @@ export interface SearchOptions {
    * Custom sandbox or JavaScript evaluator for code-based `search()` queries
    * (e.g. Node `vm.runInNewContext`, QuickJS, or a Cloudflare Dynamic Worker isolate).
    * Pass `false` to disable dynamic JS evaluation and restrict `search()` to
-   * zero-eval symbol paths (`"dns.records.create"`, `dts("...")`) and HTTP routes.
+   * zero-eval symbol paths (`"dns.records.create"`) and HTTP routes.
    */
   readonly evaluator?: CodeEvaluator | false | undefined;
 }
@@ -1169,22 +1154,22 @@ function formatSearchEvalError(schema: ApiSchema, trimmed: string, err: unknown)
   if (err instanceof EvalError) {
     return (
       `Search error: Dynamic JavaScript compilation is disallowed in this runtime (${msg}).\n` +
-      '// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an `evaluator` sandbox in createMcp.'
+      '// Tip: pass a symbol path ("dns.records.create", "dns.records.RecordSettings") or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an `evaluator` sandbox in createMcp.'
     );
   }
-  return `Search error: ${msg}\n// Tip: write a JS expression using \`methods\` (array of { path, group, name, httpMethod, route, summary, description }), \`groups\`, \`models\`, or \`dts("<symbol>")\`.`;
+  return `Search error: ${msg}\n// Tip: write a JS expression using \`methods\` (array of { path, group, name, httpMethod, route, summary, description }), \`groups\`, \`models\`, or \`client.<group>.<method>\`.`;
 }
 
 /**
- * Searches or inspects the SDK by running JavaScript against `{ schema, methods, groups, models, dts, client }`
+ * Searches or inspects the SDK by running JavaScript against `{ schema, methods, groups, models, client }`
  * or resolving a 1-level `.d.ts` symbol path directly.
  *
- * Direct symbol paths (`"dns.records.create"`), `dts("<symbol>")` calls, and HTTP routes (`"POST /zones/{zoneId}/dns_records"`)
+ * Direct symbol paths (`"dns.records.create"`) and HTTP routes (`"POST /zones/{zoneId}/dns_records"`)
  * resolve via pure static lookup without invoking `new Function` or `evaluator`.
  *
  * Examples:
- * - `search(schema)` or `search(schema, "dts()")` -> top-level `Client` namespaces
- * - `search(schema, "dns.records")` or `search(schema, 'dts("dns.records")')` -> 1-level `dns.records.Client`
+ * - `search(schema)` -> top-level `Client` namespaces
+ * - `search(schema, "dns.records")` -> 1-level `dns.records.Client`
  * - `search(schema, "dns.records.create")` -> method signature + 1-level `CreateRequest` & `CreateResponse`
  * - `search(schema, 'methods.filter(m => m.route.includes("purge_cache"))')` -> code-based search returning 1-level `.d.ts`
  */
@@ -1204,9 +1189,7 @@ export function search(
     return resolveSymbolDts(activeSchema, '')!;
   }
   const trimmed = codeOrSymbol.trim();
-  const isSimpleDtsCall = /^dts\s*\(\s*(?:(['"`])[^'"`]*\1)?\s*\)\s*;?$/.test(trimmed);
-  const isCodeExpr =
-    !isSimpleDtsCall && /^(?:dts|methods|groups|models|schema)\s*[.([]/.test(trimmed);
+  const isCodeExpr = /^(?:methods|groups|models|schema)\s*[.([]/.test(trimmed);
   if (!isCodeExpr) {
     const direct = resolveSymbolDts(activeSchema, trimmed);
     if (direct !== undefined) {
@@ -1214,7 +1197,7 @@ export function search(
     }
   }
 
-  const searchGlobals = new Set(['methods', 'groups', 'models', 'schema', 'client', 'dts']);
+  const searchGlobals = new Set(['methods', 'groups', 'models', 'schema', 'client']);
   const cleaned = cleanSymbolPath(activeSchema, trimmed);
   if (
     !isCodeExpr &&
@@ -1227,12 +1210,11 @@ export function search(
   if (options?.evaluator === false) {
     return (
       'Search error: Arbitrary JavaScript evaluation in search() is disabled (evaluator: false).\n' +
-      '// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an `evaluator` sandbox in createMcp.'
+      '// Tip: pass a symbol path ("dns.records.create", "dns.records.RecordSettings") or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an `evaluator` sandbox in createMcp.'
     );
   }
 
   const allMethods = getAllMethods(activeSchema);
-  const boundDts = (target?: unknown): string => dts(activeSchema, target);
   const clientProxy = createSearchSymbolProxy();
   try {
     const body = prepareCodeBody(trimmed);
@@ -1242,7 +1224,6 @@ export function search(
         methods: allMethods,
         groups: activeSchema.groups,
         models: activeSchema.models,
-        dts: boundDts,
         client: clientProxy,
       };
       const rawValue = options.evaluator(trimmed, globals, body);
@@ -1259,12 +1240,11 @@ export function search(
       }
       return finishSearchEvalValue(activeSchema, rawValue);
     }
-    const runner = new Function('schema', 'methods', 'groups', 'models', 'dts', 'client', body) as (
+    const runner = new Function('schema', 'methods', 'groups', 'models', 'client', body) as (
       schema: ApiSchema,
       methods: readonly SearchMethodEntry[],
       groups: Readonly<Record<string, GroupSchema>>,
       models: Readonly<Record<string, ModelSchema>>,
-      dts: (target?: unknown) => string,
       client: unknown,
     ) => unknown;
     const value = runner(
@@ -1272,7 +1252,6 @@ export function search(
       allMethods,
       activeSchema.groups,
       activeSchema.models,
-      boundDts,
       clientProxy,
     );
     return finishSearchEvalValue(activeSchema, value);
@@ -1990,7 +1969,9 @@ export function wrapClient<T extends object>(
             : available.length > 0
               ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
               : '';
-        const defBody = suffixGroup ? dts(activeSchema, suffixGroup) : dts(activeSchema, groupPath);
+        const defBody = suffixGroup
+          ? renderSymbolDts(activeSchema, suffixGroup)
+          : renderSymbolDts(activeSchema, groupPath);
         throw new TypeFeedbackError(
           [
             {
@@ -2214,7 +2195,6 @@ export async function execute<T extends object>(
     | ((
         client: T,
         searchFn: (query?: string) => string | Promise<string>,
-        dtsFn: (target?: unknown) => string,
       ) => unknown | Promise<unknown>),
   options?: ExecuteOptions | undefined,
 ): Promise<ExecuteResult> {
@@ -2222,11 +2202,10 @@ export async function execute<T extends object>(
   const checkedClient = wrapClient(client, activeSchema);
   const searchFn = (query?: string): string | Promise<string> =>
     search(activeSchema, query, options);
-  const dtsFn = (target?: unknown): string => dts(activeSchema, target);
   try {
     let value: unknown;
     if (typeof codeOrFn === 'function') {
-      value = await codeOrFn(checkedClient, searchFn, dtsFn);
+      value = await codeOrFn(checkedClient, searchFn);
     } else if (options?.evaluator === false) {
       return {
         ok: false,
@@ -2239,14 +2218,13 @@ export async function execute<T extends object>(
         const globals: Readonly<Record<string, unknown>> = {
           client: checkedClient,
           search: searchFn,
-          dts: dtsFn,
           schema: activeSchema,
         };
         value = await options.evaluator(codeOrFn, globals, body);
       } else {
         let runner: (...callArgs: unknown[]) => Promise<unknown>;
         try {
-          runner = new AsyncFunction('client', 'search', 'dts', body);
+          runner = new AsyncFunction('client', 'search', body);
         } catch (compileErr: unknown) {
           if (compileErr instanceof EvalError) {
             return {
@@ -2256,21 +2234,20 @@ export async function execute<T extends object>(
           }
           throw compileErr;
         }
-        value = await runner(checkedClient, searchFn, dtsFn);
+        value = await runner(checkedClient, searchFn);
       }
       if (typeof value === 'function' && getSymbolPath(value) === undefined) {
         value = await (
           value as (
             c: T,
             s: (q?: string) => string | Promise<string>,
-            d: (t?: unknown) => string,
           ) => unknown | Promise<unknown>
-        )(checkedClient, searchFn, dtsFn);
+        )(checkedClient, searchFn);
       }
     }
     const inspectedSymbol = getSymbolPath(value);
     if (inspectedSymbol !== undefined) {
-      const def = dts(activeSchema, inspectedSymbol);
+      const def = renderSymbolDts(activeSchema, inspectedSymbol);
       return { ok: true, result: def, typeDefinition: def };
     }
     return { ok: true, result: value };
@@ -2294,14 +2271,12 @@ export interface ProgressiveMcp<T extends object> {
   readonly schema: ApiSchema;
   readonly client: T;
   search(codeOrSymbol?: string, options?: SearchOptions): string | Promise<string>;
-  dts(target?: unknown, options?: SearchOptions): string;
   execute(
     codeOrFn:
       | string
       | ((
           client: T,
           searchFn: (query?: string) => string | Promise<string>,
-          dtsFn: (target?: unknown) => string,
         ) => unknown | Promise<unknown>),
     options?: ExecuteOptions | undefined,
   ): Promise<ExecuteResult>;
@@ -2353,11 +2328,6 @@ export function createProgressiveMcp<T extends object>(
         options !== undefined ? { ...defaultOptions, ...options } : defaultOptions;
       return search(schema, codeOrSymbol, mergedOpts);
     },
-    dts(target?: unknown, options?: SearchOptions): string {
-      const mergedOpts: SearchOptions | undefined =
-        options !== undefined ? { ...defaultOptions, ...options } : defaultOptions;
-      return dts(schema, target, mergedOpts);
-    },
     execute(codeOrFn, options): Promise<ExecuteResult> {
       const mergedOpts: ExecuteOptions | undefined =
         options !== undefined ? { ...defaultOptions, ...options } : defaultOptions;
@@ -2367,14 +2337,14 @@ export function createProgressiveMcp<T extends object>(
       {
         name: 'search',
         description:
-          'Search the SDK with JavaScript against `methods`, `groups`, and `models`, or call `dts("<symbol>")` to inspect 1-level TypeScript (.d.ts) definitions and JSDoc (e.g. `methods.filter(m => m.route.includes("purge_cache"))`, `dts("dns.records.create")`). Nested models stay nominal until inspected.',
+          'Search the SDK with JavaScript against `methods`, `groups`, `models`, and `client` to inspect 1-level TypeScript (.d.ts) definitions and JSDoc (e.g. `methods.filter(m => m.route.includes("purge_cache"))`, `client.dns.records.create`). Nested models stay nominal until inspected.',
         inputSchema: {
           type: 'object',
           properties: {
             code: {
               type: 'string',
               description:
-                'JavaScript expression/snippet filtering `methods` ({ path, group, name, httpMethod, route, summary, description }), `groups`, `models`, or `dts("<symbol>")` / symbol path (e.g. `methods.filter(m => m.route.includes("purge"))`, `dts("dns.records.create")`, or omit for top-level index).',
+                'JavaScript expression/snippet filtering `methods` ({ path, group, name, httpMethod, route, summary, description }), `groups`, `models`, or `client.<group>.<method>` / symbol path (e.g. `methods.filter(m => m.route.includes("purge"))`, `client.dns.records.create`, or omit for top-level index).',
             },
           },
         },

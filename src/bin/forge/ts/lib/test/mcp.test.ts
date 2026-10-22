@@ -5,7 +5,6 @@ import {
   type ApiSchema,
   type CodeEvaluator,
   createProgressiveMcp,
-  dts,
   execute,
   prepareCodeBody,
   search,
@@ -506,19 +505,19 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.equal(mcp.tools[0]?.name, 'search');
     assert.equal(mcp.tools[1]?.name, 'execute');
 
-    const searchRes = mcp.tools[0]!.handler({ code: 'dts("dns.records.RecordSettings")' });
+    const searchRes = mcp.tools[0]!.handler({ code: 'dns.records.RecordSettings' });
     assert.match(String(searchRes), /export interface RecordSettings \{/);
     assert.match(
       String(mcp.search('methods.filter(m => m.summary?.toLowerCase().includes("bucket"))')),
       /client\.storage\.buckets\.create/,
     );
-    assert.match(mcp.dts('storage.buckets.create'), /export interface CreateRequest \{/);
+    assert.match(String(mcp.search('storage.buckets.create')), /export interface CreateRequest \{/);
 
     const wrapped = wrapClient(client, schema);
     assert.throws(() => Reflect.get(wrapped.dns.records, 'nonExistent'), TypeFeedbackError);
   });
 
-  test('include(method) filters methods and prunes empty groups across search, dts, and execute', async () => {
+  test('include(method) filters methods and prunes empty groups across search and execute', async () => {
     const { client, calls } = makeFakeClient();
     const readOnlyMcp = createProgressiveMcp(client, schema, {
       include: (m) => m.httpMethod === 'GET' && !m.deprecated,
@@ -530,7 +529,7 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.doesNotMatch(rootDts, /storage/);
 
     // dns.records only exposes GET list (POST create is hidden)
-    const dnsRecordsDts = readOnlyMcp.dts('dns.records');
+    const dnsRecordsDts = String(readOnlyMcp.search('dns.records'));
     assert.match(dnsRecordsDts, /list\(request: ListRequest/);
     assert.doesNotMatch(dnsRecordsDts, /create\(/);
 
@@ -553,15 +552,15 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.equal(calls.length, 1);
   });
 
-  test('search() executes code-based queries against methods, groups, models, and dts()', () => {
+  test('search() executes code-based queries against methods, groups, models, and client', () => {
     const byCode = search(schema, 'methods.filter(m => m.route.includes("/buckets"))');
     assert.match(byCode, /client\.storage\.buckets\.create/);
 
-    const byDts = search(schema, 'dts(methods.find(m => m.route.includes("/buckets")))');
-    assert.match(byDts, /export interface CreateRequest \{/);
+    const byFind = search(schema, 'methods.find(m => m.route.includes("/buckets"))');
+    assert.match(byFind, /export interface CreateRequest \{/);
 
     const multiMatch = search(schema, 'methods.filter(m => m.group === "dns.records")');
-    assert.match(multiMatch, /2 matching methods - call dts\("<methodPath>"\) for full request\/response \.d\.ts\):/);
+    assert.match(multiMatch, /2 matching methods - search\("<methodPath>"\) for full request\/response \.d\.ts\):/);
     assert.match(multiMatch, /list\(request: ListRequest/);
   });
   test('flattens nested union-of-models request bodies into a single CreateRequest and prefers TS2561 across union branches', async () => {
@@ -730,11 +729,11 @@ describe('Progressive Type-Feedback MCP runtime', () => {
       'const z = await client.zones.list();\nreturn (\nz[0]\n);',
     );
 
-    // evaluator: false still allows dts("..."), symbol lookup, and HTTP route lookup in search()
+    // evaluator: false still allows symbol lookup and HTTP route lookup in search()
     const noEvalMcp = createProgressiveMcp(makeFakeClient().client, schema, {
       evaluator: false,
     });
-    const symOut = await noEvalMcp.search('dts("dns.records.create")');
+    const symOut = await noEvalMcp.search('client.dns.records.create');
     assert.match(symOut, /export interface CreateRequest \{/);
     const routeOut = await noEvalMcp.search('POST /zones/{zoneId}/dns_records');
     assert.match(routeOut, /\/\/ Method: client\.dns\.records\.create/);

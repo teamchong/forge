@@ -54,7 +54,6 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let api_schema_ty = mcp_mod.ident("ApiSchema").ty();
     let code_evaluator_ty = mcp_mod.ident("CodeEvaluator").ty();
     let create_progressive = mcp_mod.ident("createProgressiveMcp");
-    let dts_fn = mcp_mod.ident("dts");
     let execute_fn = mcp_mod.ident("execute");
     let filter_schema_fn = mcp_mod.ident("filterSchema");
     let method_schema_ty = mcp_mod.ident("MethodSchema").ty();
@@ -69,8 +68,6 @@ fn mcp_entry_file(schema_json: &str) -> File {
         f,
         "export { ",
         create_progressive,
-        ", ",
-        dts_fn,
         ", ",
         execute_fn,
         ", ",
