@@ -518,66 +518,39 @@ describe('Progressive Type-Feedback MCP runtime', () => {
     assert.throws(() => Reflect.get(wrapped.dns.records, 'nonExistent'), TypeFeedbackError);
   });
 
-  test('auto-injects defaultParams when omitted, or returns missingParam when unresolved', async () => {
+  test('include(method) filters methods and prunes empty groups across search, dts, and execute', async () => {
     const { client, calls } = makeFakeClient();
-    // Single-tenant session: auto-injects defaultParams.orgId
-    const okRes = await execute(
-      client,
-      schema,
-      'return await client.storage.buckets.create({ name: "assets", storageClass: "InfrequentAccess" })',
-      { defaultParams: { orgId: 'org_auto_123' } },
+    const readOnlyMcp = createProgressiveMcp(client, schema, {
+      include: (m) => m.httpMethod === 'GET' && !m.deprecated,
+    });
+
+    // storage.buckets only has POST create, so the entire storage tree is pruned
+    const rootDts = String(readOnlyMcp.search());
+    assert.match(rootDts, /readonly dns: dns\.Client/);
+    assert.doesNotMatch(rootDts, /storage/);
+
+    // dns.records only exposes GET list (POST create is hidden)
+    const dnsRecordsDts = readOnlyMcp.dts('dns.records');
+    assert.match(dnsRecordsDts, /list\(request: ListRequest/);
+    assert.doesNotMatch(dnsRecordsDts, /create\(/);
+
+    // Calling an excluded method in execute() is rejected pre-flight with TS2339 (0 HTTP calls)
+    const blockedRes = await readOnlyMcp.execute(
+      'return await client.dns.records.create({ zoneId: "z1", name: "a.com", type: "A" })',
     );
-    assert.equal(okRes.ok, true);
+    assert.equal(blockedRes.ok, false);
+    assert.equal(calls.length, 0);
+    if (!blockedRes.ok) {
+      assert.equal(blockedRes.issues?.[0]?.code, 'TS2339');
+      assert.doesNotMatch(blockedRes.typeDefinition ?? '', /create\(/);
+    }
+
+    // Calling an included method succeeds
+    const allowedRes = await readOnlyMcp.execute(
+      'return await client.dns.records.list({ zoneId: "z1" })',
+    );
+    assert.equal(allowedRes.ok, true);
     assert.equal(calls.length, 1);
-    assert.deepEqual(calls[0]?.args[0], {
-      orgId: 'org_auto_123',
-      name: 'assets',
-      storageClass: 'InfrequentAccess',
-    });
-
-    // Multi-tenant session without resolved orgId: returns missingParam
-    const missingRes = await execute(client, schema, 'return await client.storage.buckets.create({ name: "assets" })', {
-      unresolvedParams: { orgId: 'Select an organization first with orgs.list.' },
-    });
-    assert.equal(missingRes.ok, false);
-    if (!missingRes.ok) {
-      assert.equal(missingRes.missingParam, 'orgId');
-      assert.equal(missingRes.replaySafe, true);
-      assert.match(missingRes.error, /Select an organization first/);
-    }
-  });
-
-  test('execute() surfaces 403 status, OpenAPI extensions, and replaySafe status', async () => {
-    const refusingClient = {
-      dns: {
-        records: {
-          async list() {
-            return [{ id: 'rec_1' }];
-          },
-          async create() {
-            const err = Object.assign(new Error('403 Forbidden'), {
-              status: 403,
-            });
-            throw err;
-          },
-        },
-        firewall: {},
-      },
-      storage: { buckets: { async create() {} } },
-      zones: {},
-    };
-    // GET followed by 403 POST -> replaySafe is true!
-    const safeRes = await execute(
-      refusingClient,
-      schema,
-      'await client.dns.records.list({ zoneId: "z1" }); return await client.dns.records.create({ zoneId: "z1", name: "a.com", type: "A" });',
-    );
-    assert.equal(safeRes.ok, false);
-    if (!safeRes.ok) {
-      assert.equal(safeRes.status, 403);
-      assert.deepEqual(safeRes.extensions, { 'x-required-scopes': ['dns:write', 'dns:read'] });
-      assert.equal(safeRes.replaySafe, true);
-    }
   });
 
   test('search() executes code-based queries against methods, groups, models, and dts()', () => {

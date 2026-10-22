@@ -760,20 +760,102 @@ function cleanSymbolPath(schema: ApiSchema, rawSymbol?: string): string {
   );
 }
 
+const FILTERED_SCHEMA_CACHE = new WeakMap<
+  (method: MethodSchema) => boolean,
+  WeakMap<ApiSchema, ApiSchema>
+>();
+
+/**
+ * Returns a view of `schema` containing only methods where `include(method)` returns `true`,
+ * pruning groups that have no remaining methods in their subtree.
+ */
+export function filterSchema(
+  schema: ApiSchema,
+  include?: ((method: MethodSchema) => boolean) | undefined,
+): ApiSchema {
+  if (!include) {
+    return schema;
+  }
+  let bySchema = FILTERED_SCHEMA_CACHE.get(include);
+  if (!bySchema) {
+    bySchema = new WeakMap<ApiSchema, ApiSchema>();
+    FILTERED_SCHEMA_CACHE.set(include, bySchema);
+  }
+  const cached = bySchema.get(schema);
+  if (cached) {
+    return cached;
+  }
+
+  const filteredMethods = new Map<string, readonly MethodSchema[]>();
+  for (const [path, group] of Object.entries(schema.groups)) {
+    filteredMethods.set(path, group.methods.filter(include));
+  }
+
+  const hasSubtreeMethods = new Map<string, boolean>();
+  const checkSubtree = (path: string): boolean => {
+    const existing = hasSubtreeMethods.get(path);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const group = schema.groups[path];
+    if (!group) {
+      hasSubtreeMethods.set(path, false);
+      return false;
+    }
+    let keep = (filteredMethods.get(path)?.length ?? 0) > 0;
+    for (const childName of group.children) {
+      if (checkSubtree(`${path}.${childName}`)) {
+        keep = true;
+      }
+    }
+    hasSubtreeMethods.set(path, keep);
+    return keep;
+  };
+
+  for (const path of Object.keys(schema.groups)) {
+    checkSubtree(path);
+  }
+
+  const groups: Record<string, GroupSchema> = {};
+  for (const [path, group] of Object.entries(schema.groups)) {
+    if (!hasSubtreeMethods.get(path)) {
+      continue;
+    }
+    groups[path] = {
+      ...group,
+      children: group.children.filter((childName) => hasSubtreeMethods.get(`${path}.${childName}`)),
+      methods: filteredMethods.get(path) ?? [],
+    };
+  }
+
+  const filtered: ApiSchema = {
+    ...schema,
+    rootChildren: schema.rootChildren.filter((name) => hasSubtreeMethods.get(name)),
+    groups,
+  };
+  bySchema.set(schema, filtered);
+  return filtered;
+}
+
 /**
  * Renders a progressive 1-level `.d.ts` TypeScript & JSDoc definition for an SDK symbol,
  * method/group/model object, or array of matches.
  */
-export function dts(schema: ApiSchema, target?: unknown): string {
+export function dts(
+  schema: ApiSchema,
+  target?: unknown,
+  options?: SearchOptions | undefined,
+): string {
+  const activeSchema = filterSchema(schema, options?.include);
   if (typeof target === 'string' || target === undefined || target === null) {
     const rawSymbol = typeof target === 'string' ? target : '';
-    const resolved = resolveSymbolDts(schema, rawSymbol);
+    const resolved = resolveSymbolDts(activeSchema, rawSymbol);
     if (resolved !== undefined) {
       return resolved;
     }
-    return renderUnknownSymbolDiagnostic(schema, rawSymbol);
+    return renderUnknownSymbolDiagnostic(activeSchema, rawSymbol);
   }
-  return formatSearchEvalResult(schema, target);
+  return formatSearchEvalResult(activeSchema, target);
 }
 
 function resolveSymbolDts(schema: ApiSchema, rawSymbol?: string): string | undefined {
@@ -1057,6 +1139,11 @@ export type CodeEvaluator = (
 
 export interface SearchOptions {
   /**
+   * Filter which SDK methods are exposed in `search()`, `dts()`, and `execute()`
+   * (e.g. `(m) => !m.deprecated && m.httpMethod === 'GET'`, or checking `m.extensions`).
+   */
+  readonly include?: ((method: MethodSchema) => boolean) | undefined;
+  /**
    * Custom sandbox or JavaScript evaluator for code-based `search()` queries
    * (e.g. Node `vm.runInNewContext`, QuickJS, or a Cloudflare Dynamic Worker isolate).
    * Pass `false` to disable dynamic JS evaluation and restrict `search()` to
@@ -1082,7 +1169,7 @@ function formatSearchEvalError(schema: ApiSchema, trimmed: string, err: unknown)
   if (err instanceof EvalError) {
     return (
       `Search error: Dynamic JavaScript compilation is disallowed in this runtime (${msg}).\n` +
-      `// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an \`evaluator\` sandbox in createMcp.`
+      '// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an `evaluator` sandbox in createMcp.'
     );
   }
   return `Search error: ${msg}\n// Tip: write a JS expression using \`methods\` (array of { path, group, name, httpMethod, route, summary, description }), \`groups\`, \`models\`, or \`dts("<symbol>")\`.`;
@@ -1112,48 +1199,49 @@ export function search(
   codeOrSymbol?: string,
   options?: SearchOptions,
 ): string | Promise<string> {
+  const activeSchema = filterSchema(schema, options?.include);
   if (!codeOrSymbol || !codeOrSymbol.trim()) {
-    return resolveSymbolDts(schema, '')!;
+    return resolveSymbolDts(activeSchema, '')!;
   }
   const trimmed = codeOrSymbol.trim();
   const isSimpleDtsCall = /^dts\s*\(\s*(?:(['"`])[^'"`]*\1)?\s*\)\s*;?$/.test(trimmed);
   const isCodeExpr =
     !isSimpleDtsCall && /^(?:dts|methods|groups|models|schema)\s*[.([]/.test(trimmed);
   if (!isCodeExpr) {
-    const direct = resolveSymbolDts(schema, trimmed);
+    const direct = resolveSymbolDts(activeSchema, trimmed);
     if (direct !== undefined) {
       return direct;
     }
   }
 
   const searchGlobals = new Set(['methods', 'groups', 'models', 'schema', 'client', 'dts']);
-  const cleaned = cleanSymbolPath(schema, trimmed);
+  const cleaned = cleanSymbolPath(activeSchema, trimmed);
   if (
     !isCodeExpr &&
     /^[a-zA-Z0-9_.$]+$/.test(cleaned) &&
     !searchGlobals.has(cleaned)
   ) {
-    return renderUnknownSymbolDiagnostic(schema, trimmed);
+    return renderUnknownSymbolDiagnostic(activeSchema, trimmed);
   }
 
   if (options?.evaluator === false) {
     return (
-      `Search error: Arbitrary JavaScript evaluation in search() is disabled (evaluator: false).\n` +
-      `// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an \`evaluator\` sandbox in createMcp.`
+      'Search error: Arbitrary JavaScript evaluation in search() is disabled (evaluator: false).\n' +
+      '// Tip: pass a symbol path ("dns.records.create", dts("dns.records.RecordSettings")) or HTTP route ("POST /zones/{zoneId}/dns_records"), or configure an `evaluator` sandbox in createMcp.'
     );
   }
 
-  const allMethods = getAllMethods(schema);
-  const boundDts = (target?: unknown): string => dts(schema, target);
+  const allMethods = getAllMethods(activeSchema);
+  const boundDts = (target?: unknown): string => dts(activeSchema, target);
   const clientProxy = createSearchSymbolProxy();
   try {
     const body = prepareCodeBody(trimmed);
     if (typeof options?.evaluator === 'function') {
       const globals: Readonly<Record<string, unknown>> = {
-        schema,
+        schema: activeSchema,
         methods: allMethods,
-        groups: schema.groups,
-        models: schema.models,
+        groups: activeSchema.groups,
+        models: activeSchema.models,
         dts: boundDts,
         client: clientProxy,
       };
@@ -1165,13 +1253,12 @@ export function search(
           typeof (rawValue as { readonly then?: unknown }).then === 'function')
       ) {
         return Promise.resolve(rawValue).then(
-          (val) => finishSearchEvalValue(schema, val),
-          (err: unknown) => formatSearchEvalError(schema, trimmed, err),
+          (val) => finishSearchEvalValue(activeSchema, val),
+          (err: unknown) => formatSearchEvalError(activeSchema, trimmed, err),
         );
       }
-      return finishSearchEvalValue(schema, rawValue);
+      return finishSearchEvalValue(activeSchema, rawValue);
     }
-
     const runner = new Function('schema', 'methods', 'groups', 'models', 'dts', 'client', body) as (
       schema: ApiSchema,
       methods: readonly SearchMethodEntry[],
@@ -1180,10 +1267,17 @@ export function search(
       dts: (target?: unknown) => string,
       client: unknown,
     ) => unknown;
-    const value = runner(schema, allMethods, schema.groups, schema.models, boundDts, clientProxy);
-    return finishSearchEvalValue(schema, value);
+    const value = runner(
+      activeSchema,
+      allMethods,
+      activeSchema.groups,
+      activeSchema.models,
+      boundDts,
+      clientProxy,
+    );
+    return finishSearchEvalValue(activeSchema, value);
   } catch (err: unknown) {
-    return formatSearchEvalError(schema, trimmed, err);
+    return formatSearchEvalError(activeSchema, trimmed, err);
   }
 }
 function validateValue(
@@ -1827,110 +1921,23 @@ function getSymbolPath(value: unknown): string | undefined {
   return undefined;
 }
 
+export interface ExecuteOptions extends SearchOptions {}
 /**
  * Wraps a generated Forge SDK `Client` in a progressive type-feedback `Proxy`.
  * Unknown property accesses and invalid method arguments throw a `TypeFeedbackError`
  * with compiler diagnostics and the relevant `.d.ts` type definition BEFORE any HTTP request is made.
- * Returning an uninvoked namespace, method, or model from `execute()` inspects its 1-level `.d.ts` signature.
- */
-export interface ExecuteOptions extends SearchOptions {
-  /**
-   * Default parameter values for the session (e.g. `{ orgId: 'org_123' }`).
-   * Automatically injected into methods that declare a matching required parameter
-   * when omitted by the caller.
-   */
-  readonly defaultParams?: Readonly<Record<string, unknown>> | undefined;
-  /**
-   * Custom guidance messages for required parameters when omitted by both the caller
-   * and `defaultParams` (e.g. `{ orgId: 'Select an organization first with orgs.list.' }`).
-   */
-  readonly unresolvedParams?: Readonly<Record<string, string>> | undefined;
-  /**
-   * Custom sandbox or JavaScript evaluator for string snippets passed to `execute()` and `search()`
-   * (e.g. Node `vm.runInNewContext`, `@cloudflare/codemode`, or a Cloudflare Dynamic Worker isolate).
-   * Receives `(code, globals, functionBody)` where `globals` contains `{ client, search, dts, schema }`.
-   * Pass `false` to forbid dynamic string evaluation unless a callback function is used.
-   */
-  readonly evaluator?: CodeEvaluator | false | undefined;
-}
-class MissingParamError extends Error {
-  readonly param: string;
-  readonly methodPath: string;
-  constructor(message: string, param: string, methodPath: string) {
-    super(message);
-    this.name = 'MissingParamError';
-    this.param = param;
-    this.methodPath = methodPath;
-  }
-}
-
-interface CallLogEntry {
-  readonly methodSchema: MethodSchema;
-  status?: number | undefined;
-}
-
-interface WrapContext {
-  readonly options?: ExecuteOptions | undefined;
-  readonly callLog?: CallLogEntry[] | undefined;
-}
-
-function resolveDefaultArgs(
-  methodSchema: MethodSchema,
-  args: unknown[],
-  options?: ExecuteOptions | undefined,
-): unknown[] {
-  const defaultParams = options?.defaultParams;
-  const unresolvedParams = options?.unresolvedParams;
-  if (!defaultParams && !unresolvedParams) {
-    return args;
-  }
-  const requiredParams = methodSchema.requestParams.filter(
-    (p) =>
-      p.required &&
-      ((defaultParams !== undefined && (p.name in defaultParams || p.wireName in defaultParams)) ||
-        (unresolvedParams !== undefined && (p.name in unresolvedParams || p.wireName in unresolvedParams))),
-  );
-  if (requiredParams.length === 0) {
-    return args;
-  }
-  const first = args[0];
-  const record = isPlainRecord(first) ? first : undefined;
-  let injected: Record<string, unknown> | undefined;
-  for (const param of requiredParams) {
-    const existing = record?.[param.name] ?? record?.[param.wireName];
-    if (existing !== undefined && existing !== '') {
-      continue;
-    }
-    const fallback = defaultParams?.[param.name] ?? defaultParams?.[param.wireName];
-    if (fallback !== undefined && fallback !== '') {
-      injected ??= record ? { ...record } : {};
-      injected[param.name] = fallback;
-      continue;
-    }
-    const unresolvedMessage = unresolvedParams?.[param.name] ?? unresolvedParams?.[param.wireName];
-    if (unresolvedMessage !== undefined) {
-      throw new MissingParamError(unresolvedMessage, param.name, methodSchema.path);
-    }
-  }
-  if (!injected) {
-    return args;
-  }
-  return first === undefined ? [injected] : [injected, ...args.slice(1)];
-}
-
-/**
- * Wraps a generated Forge SDK `Client` in a progressive type-feedback `Proxy`.
- * Unknown property accesses and invalid method arguments throw a `TypeFeedbackError`
- * with compiler diagnostics and the relevant `.d.ts` type definition BEFORE any HTTP request is made.
+ *
  * Returning an uninvoked namespace, method, or model from `execute()` inspects its 1-level `.d.ts` signature.
  */
 export function wrapClient<T extends object>(
   client: T,
   schema: ApiSchema,
   groupPath = '',
-  ctx?: WrapContext | undefined,
+  options?: ExecuteOptions | undefined,
 ): T {
+  const activeSchema = groupPath === '' ? filterSchema(schema, options?.include) : schema;
   const cache = new Map<string | symbol, unknown>();
+
   return new Proxy(client, {
     has(target, prop) {
       if (prop === SYMBOL_PATH) {
@@ -1950,11 +1957,13 @@ export function wrapClient<T extends object>(
       }
 
       const fullPath = groupPath === '' ? prop : `${groupPath}.${prop}`;
-      const group = groupPath === '' ? undefined : schema.groups[groupPath];
+      const group = groupPath === '' ? undefined : activeSchema.groups[groupPath];
       const isChildGroup =
-        groupPath === '' ? schema.rootChildren.includes(prop) : (group?.children.includes(prop) ?? false);
+        groupPath === ''
+          ? activeSchema.rootChildren.includes(prop)
+          : (group?.children.includes(prop) ?? false);
       const methodSchema = group?.methods.find((m) => m.name === prop);
-      const modelSchema = schema.models[fullPath];
+      const modelSchema = activeSchema.models[fullPath];
 
       if (!isChildGroup && !methodSchema) {
         if (modelSchema) {
@@ -1964,22 +1973,24 @@ export function wrapClient<T extends object>(
         }
         const available =
           groupPath === ''
-            ? schema.rootChildren
+            ? activeSchema.rootChildren
             : [...(group?.children ?? []), ...(group?.methods.map((m) => m.name) ?? [])];
         const closest = available
           .map((name) => ({ name, dist: editDistance(prop, name) }))
           .sort((a, b) => a.dist - b.dist)[0];
         const ownerType = groupPath === '' ? 'Client' : `${groupPath}.Client`;
         const lowerSuffix = `.${fullPath.toLowerCase()}`;
-        const suffixGroup = Object.keys(schema.groups).find((g) => g.toLowerCase().endsWith(lowerSuffix));
+        const suffixGroup = Object.keys(activeSchema.groups).find((g) =>
+          g.toLowerCase().endsWith(lowerSuffix),
+        );
         const hint = suffixGroup
           ? ` Did you mean 'client.${suffixGroup}'?`
           : closest && closest.dist <= 3
             ? ` Did you mean '${closest.name}'?`
-          : available.length > 0
-            ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
-            : '';
-        const defBody = suffixGroup ? dts(schema, suffixGroup) : dts(schema, groupPath);
+            : available.length > 0
+              ? ` Available on '${ownerType}': ${available.slice(0, 8).join(', ')}.`
+              : '';
+        const defBody = suffixGroup ? dts(activeSchema, suffixGroup) : dts(activeSchema, groupPath);
         throw new TypeFeedbackError(
           [
             {
@@ -1993,46 +2004,39 @@ export function wrapClient<T extends object>(
       }
 
       const rawValue: unknown = Reflect.get(target, prop, receiver);
+
       if (methodSchema && typeof rawValue === 'function') {
         const wrappedFn = (...args: unknown[]) => {
-          const effectiveArgs = resolveDefaultArgs(methodSchema, args, ctx?.options);
-          validateMethodCall(schema, methodSchema, effectiveArgs);
-          const logEntry: CallLogEntry = { methodSchema };
-          ctx?.callLog?.push(logEntry);
-          const res = (rawValue as (...callArgs: unknown[]) => unknown).apply(target, effectiveArgs);
+          validateMethodCall(activeSchema, methodSchema, args);
+          const res = (rawValue as (...callArgs: unknown[]) => unknown).apply(target, args);
           if (res instanceof Promise) {
-            return res.then(
-              (val) => {
-                logEntry.status = 200;
-                if (isPlainRecord(val) && isPlainRecord(val['result'])) {
-                  const respFlat = methodSchema.responseType
-                    ? resolveFlatObjectType(schema, methodSchema.responseType, new Set(), true)
-                    : undefined;
-                  if (respFlat && !respFlat.fields.some((f) => f.name === 'result')) {
-                    return { ...val['result'], ...val };
-                  }
+            return res.then((val: unknown) => {
+              if (isPlainRecord(val) && isPlainRecord(val['result'])) {
+                const respFlat = methodSchema.responseType
+                  ? resolveFlatObjectType(activeSchema, methodSchema.responseType, new Set(), true)
+                  : undefined;
+                if (respFlat && !respFlat.fields.some((f) => f.name === 'result')) {
+                  return { ...val['result'], ...val };
                 }
-                return val;
-              },
-              (err: unknown) => {
-                if (typeof err === 'object' && err !== null && 'status' in err && typeof err.status === 'number') {
-                  logEntry.status = err.status;
-                }
-                throw err;
-              },
-            );
+              }
+              return val;
+            });
           }
-          logEntry.status = 200;
           return res;
         };
+
         Object.defineProperty(wrappedFn, SYMBOL_PATH, { value: fullPath });
+
         if (isChildGroup) {
-          const childTarget = typeof rawValue === 'object' && rawValue !== null ? rawValue : {};
-          const childProxy = wrapClient(childTarget, schema, fullPath, ctx);
+          const childTarget =
+            typeof rawValue === 'object' && rawValue !== null ? rawValue : {};
+          const childProxy = wrapClient(childTarget, activeSchema, fullPath);
           const hybrid = new Proxy(wrappedFn, {
             has(fnTarget, childProp) {
               return (
-                childProp === SYMBOL_PATH || Reflect.has(childProxy, childProp) || Reflect.has(fnTarget, childProp)
+                childProp === SYMBOL_PATH ||
+                Reflect.has(childProxy, childProp) ||
+                Reflect.has(fnTarget, childProp)
               );
             },
             get(_fnTarget, childProp) {
@@ -2045,14 +2049,17 @@ export function wrapClient<T extends object>(
           cache.set(prop, hybrid);
           return hybrid;
         }
+
         cache.set(prop, wrappedFn);
         return wrappedFn;
       }
 
       if (isChildGroup) {
         const childTarget =
-          (typeof rawValue === 'object' || typeof rawValue === 'function') && rawValue !== null ? rawValue : {};
-        const wrappedGroup = wrapClient(childTarget, schema, fullPath, ctx);
+          (typeof rawValue === 'object' || typeof rawValue === 'function') && rawValue !== null
+            ? rawValue
+            : {};
+        const wrappedGroup = wrapClient(childTarget, activeSchema, fullPath);
         cache.set(prop, wrappedGroup);
         return wrappedGroup;
       }
@@ -2073,10 +2080,6 @@ export type ExecuteResult =
       readonly error: string;
       readonly issues?: readonly ValidationIssue[] | undefined;
       readonly typeDefinition?: string | undefined;
-      readonly status?: number | undefined;
-      readonly extensions?: Readonly<Record<string, unknown>> | undefined;
-      readonly replaySafe?: boolean | undefined;
-      readonly missingParam?: string | undefined;
     };
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
@@ -2144,15 +2147,14 @@ function findLastTopLevelStatementBoundary(src: string): number {
         const after = src.slice(i + 1).trimStart();
         const continuesFromBefore =
           before.length === 0 ||
-          /[.,+*\-%&|^=<>?:!~([{/]$/.test(before) ||
+          /[.,+\-*%&|^=!<>?:({\[]$/.test(before) ||
           /\b(?:return|const|let|var|await|typeof|void|delete|new|in|instanceof|of|else|do|try|finally)\s*$/.test(
             before,
           );
         const continuesOnAfter =
           after.length === 0 ||
-          /^(?:\?\.|[.,+*\-%&|^=<>?:)\]}]|\/(?![/*])|\b(?:in|instanceof|else|catch|finally|while)\b)/.test(
-            after,
-          );
+          /^[.,+\-*%&|^=!<>?:)\]}]/.test(after) ||
+          /^(?:in|instanceof|else|catch|finally|while)\b/.test(after);
         if (!continuesFromBefore && !continuesOnAfter) {
           lastBoundary = i;
         }
@@ -2177,8 +2179,7 @@ export function prepareCodeBody(code: string): string {
   if (withoutTrailingSemicolon === '') {
     return 'return undefined;';
   }
-  const stmtKeywordRe =
-    /^(return|const|let|var|if|for|while|do|switch|try|throw|function|class|break|continue)\b/;
+  const stmtKeywordRe = /^(?:return|const|let|var|if|for|while|do|switch|try|throw|function|class|break|continue)\b/;
   const splitIdx = findLastTopLevelStatementBoundary(withoutTrailingSemicolon);
   if (splitIdx === -1) {
     if (!stmtKeywordRe.test(withoutTrailingSemicolon)) {
@@ -2186,6 +2187,7 @@ export function prepareCodeBody(code: string): string {
     }
     return trimmed;
   }
+
   const prefix = withoutTrailingSemicolon
     .slice(0, splitIdx)
     .replace(/;+\s*$/, '')
@@ -2197,23 +2199,12 @@ export function prepareCodeBody(code: string): string {
   return trimmed;
 }
 
-function isCallLogReplaySafe(callLog: readonly CallLogEntry[]): boolean {
-  return callLog.every(
-    (entry) =>
-      entry.methodSchema.httpMethod === 'GET' ||
-      entry.methodSchema.httpMethod === 'HEAD' ||
-      entry.status === 401 ||
-      entry.status === 403,
-  );
-}
-
 /**
  * Executes an agent callback or JavaScript snippet against the type-checked Forge SDK `client`.
  * - If the snippet returns an uninvoked SDK namespace, method, or model (e.g. `client.dns.records` or `client.dns.records.create`),
  *   returns its 1-level `.d.ts` TypeScript definition.
- * - When a `TypeFeedbackError` occurs, returns `{ ok: false, error, issues, typeDefinition, replaySafe: true }` so the
+ * - When a `TypeFeedbackError` occurs, returns `{ ok: false, error, issues, typeDefinition }` so the
  *   agent receives the exact compiler-style error and `.d.ts` definition in a single turn.
- * - When an HTTP 401/403 refusal occurs, surfaces `status`, `extensions` (OpenAPI `x-*` metadata), and `replaySafe`.
  */
 export async function execute<T extends object>(
   client: T,
@@ -2227,10 +2218,11 @@ export async function execute<T extends object>(
       ) => unknown | Promise<unknown>),
   options?: ExecuteOptions | undefined,
 ): Promise<ExecuteResult> {
-  const callLog: CallLogEntry[] = [];
-  const checkedClient = wrapClient(client, schema, '', { options, callLog });
-  const searchFn = (query?: string): string | Promise<string> => search(schema, query, options);
-  const dtsFn = (target?: unknown): string => dts(schema, target);
+  const activeSchema = filterSchema(schema, options?.include);
+  const checkedClient = wrapClient(client, activeSchema);
+  const searchFn = (query?: string): string | Promise<string> =>
+    search(activeSchema, query, options);
+  const dtsFn = (target?: unknown): string => dts(activeSchema, target);
   try {
     let value: unknown;
     if (typeof codeOrFn === 'function') {
@@ -2240,7 +2232,6 @@ export async function execute<T extends object>(
         ok: false,
         error:
           'Dynamic JavaScript string evaluation in execute() is disabled (evaluator: false). Configure an `evaluator` sandbox in ExecuteOptions / createMcp or pass a callback function.',
-        replaySafe: true,
       };
     } else {
       const body = prepareCodeBody(codeOrFn);
@@ -2249,70 +2240,52 @@ export async function execute<T extends object>(
           client: checkedClient,
           search: searchFn,
           dts: dtsFn,
-          schema,
+          schema: activeSchema,
         };
         value = await options.evaluator(codeOrFn, globals, body);
       } else {
+        let runner: (...callArgs: unknown[]) => Promise<unknown>;
         try {
-          const runner = new AsyncFunction('client', 'search', 'dts', body);
-          value = await runner(checkedClient, searchFn, dtsFn);
+          runner = new AsyncFunction('client', 'search', 'dts', body);
         } catch (compileErr: unknown) {
-          if (compileErr instanceof EvalError && callLog.length === 0) {
+          if (compileErr instanceof EvalError) {
             return {
               ok: false,
               error: `Dynamic JavaScript compilation is disallowed in this runtime (${compileErr.message}). Configure an \`evaluator\` sandbox (e.g. Cloudflare Dynamic Worker isolate or VM sandbox) in createMcp / ExecuteOptions, or pass a callback function to execute().`,
-              replaySafe: true,
             };
           }
           throw compileErr;
         }
+        value = await runner(checkedClient, searchFn, dtsFn);
       }
-    }
-    if (typeof value === 'function' && getSymbolPath(value) === undefined) {
-      value = await (
-        value as (
-          c: T,
-          s: (q?: string) => string | Promise<string>,
-          d: (t?: unknown) => string,
-        ) => unknown
-      )(checkedClient, searchFn, dtsFn);
+      if (typeof value === 'function' && getSymbolPath(value) === undefined) {
+        value = await (
+          value as (
+            c: T,
+            s: (q?: string) => string | Promise<string>,
+            d: (t?: unknown) => string,
+          ) => unknown | Promise<unknown>
+        )(checkedClient, searchFn, dtsFn);
+      }
     }
     const inspectedSymbol = getSymbolPath(value);
     if (inspectedSymbol !== undefined) {
-      const def = dts(schema, inspectedSymbol);
+      const def = dts(activeSchema, inspectedSymbol);
       return { ok: true, result: def, typeDefinition: def };
     }
     return { ok: true, result: value };
   } catch (err: unknown) {
-    const replaySafe = isCallLogReplaySafe(callLog);
     if (err instanceof TypeFeedbackError) {
       return {
         ok: false,
         error: err.message,
         issues: err.issues,
         typeDefinition: err.typeDefinition,
-        replaySafe,
       };
     }
-    if (err instanceof MissingParamError) {
-      return {
-        ok: false,
-        error: err.message,
-        missingParam: err.param,
-        replaySafe,
-      };
-    }
-    const lastCall = callLog[callLog.length - 1];
-    const status =
-      typeof err === 'object' && err !== null && 'status' in err && typeof err.status === 'number'
-        ? err.status
-        : undefined;
     return {
       ok: false,
       error: err instanceof Error ? err.message : String(err),
-      status,
-      extensions: lastCall?.methodSchema.extensions,
-      replaySafe,
     };
   }
 }
@@ -2321,7 +2294,7 @@ export interface ProgressiveMcp<T extends object> {
   readonly schema: ApiSchema;
   readonly client: T;
   search(codeOrSymbol?: string, options?: SearchOptions): string | Promise<string>;
-  dts(target?: unknown): string;
+  dts(target?: unknown, options?: SearchOptions): string;
   execute(
     codeOrFn:
       | string
@@ -2355,13 +2328,9 @@ export interface ProgressiveMcp<T extends object> {
         readonly required: readonly ['code'];
         readonly properties: {
           readonly code: { readonly type: 'string'; readonly description: string };
-          readonly params: { readonly type: 'object'; readonly description: string };
         };
       };
-      handler(args: {
-        readonly code: string;
-        readonly params?: Readonly<Record<string, unknown>> | undefined;
-      }): Promise<ExecuteResult>;
+      handler(args: { readonly code: string }): Promise<ExecuteResult>;
     },
   ];
 }
@@ -2374,15 +2343,20 @@ export function createProgressiveMcp<T extends object>(
   schema: ApiSchema,
   defaultOptions?: ExecuteOptions | undefined,
 ): ProgressiveMcp<T> {
-  const checkedClient = wrapClient(client, schema, '', { options: defaultOptions });
+  const activeSchema = filterSchema(schema, defaultOptions?.include);
+  const checkedClient = wrapClient(client, activeSchema);
   return {
-    schema,
+    schema: activeSchema,
     client: checkedClient,
     search(codeOrSymbol?: string, options?: SearchOptions): string | Promise<string> {
-      return search(schema, codeOrSymbol, options ?? defaultOptions);
+      const mergedOpts: SearchOptions | undefined =
+        options !== undefined ? { ...defaultOptions, ...options } : defaultOptions;
+      return search(schema, codeOrSymbol, mergedOpts);
     },
-    dts(target?: unknown): string {
-      return dts(schema, target);
+    dts(target?: unknown, options?: SearchOptions): string {
+      const mergedOpts: SearchOptions | undefined =
+        options !== undefined ? { ...defaultOptions, ...options } : defaultOptions;
+      return dts(schema, target, mergedOpts);
     },
     execute(codeOrFn, options): Promise<ExecuteResult> {
       const mergedOpts: ExecuteOptions | undefined =
@@ -2408,7 +2382,7 @@ export function createProgressiveMcp<T extends object>(
           readonly code?: string;
           readonly query?: string;
         }): string | Promise<string> {
-          return search(schema, args?.code ?? args?.query, defaultOptions);
+          return search(activeSchema, args?.code ?? args?.query, defaultOptions);
         },
       },
       {
@@ -2424,25 +2398,10 @@ export function createProgressiveMcp<T extends object>(
               description:
                 'JavaScript expression or async function body using `client` (e.g. `await client.dns.records.list({ zoneId: "..." })`).',
             },
-            params: {
-              type: 'object',
-              description:
-                'Optional default parameter values automatically injected into methods that declare a matching required parameter when omitted in `code`.',
-            },
           },
         },
-        handler(args: {
-          readonly code: string;
-          readonly params?: Readonly<Record<string, unknown>> | undefined;
-        }): Promise<ExecuteResult> {
-          const opts: ExecuteOptions | undefined =
-            args.params !== undefined
-              ? {
-                  ...defaultOptions,
-                  defaultParams: { ...defaultOptions?.defaultParams, ...args.params },
-                }
-              : defaultOptions;
-          return execute(client, schema, args.code, opts);
+        handler(args: { readonly code: string }): Promise<ExecuteResult> {
+          return execute(client, activeSchema, args.code, defaultOptions);
         },
       },
     ],

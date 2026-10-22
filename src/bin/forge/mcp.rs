@@ -56,6 +56,8 @@ fn mcp_entry_file(schema_json: &str) -> File {
     let create_progressive = mcp_mod.ident("createProgressiveMcp");
     let dts_fn = mcp_mod.ident("dts");
     let execute_fn = mcp_mod.ident("execute");
+    let filter_schema_fn = mcp_mod.ident("filterSchema");
+    let method_schema_ty = mcp_mod.ident("MethodSchema").ty();
     let prepare_code_body_fn = mcp_mod.ident("prepareCodeBody");
     let search_fn = mcp_mod.ident("search");
     let exec_opts_ty = mcp_mod.ident("ExecuteOptions").ty();
@@ -71,6 +73,8 @@ fn mcp_entry_file(schema_json: &str) -> File {
         dts_fn,
         ", ",
         execute_fn,
+        ", ",
+        filter_schema_fn,
         ", ",
         prepare_code_body_fn,
         ", ",
@@ -89,6 +93,8 @@ fn mcp_entry_file(schema_json: &str) -> File {
         exec_opts_ty,
         ", ",
         mcp_mod.ident("ExecuteResult").ty(),
+        ", ",
+        method_schema_ty,
         ", ",
         progressive_ty,
         ", ",
