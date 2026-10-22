@@ -328,7 +328,7 @@ fn response_type(f: &mut File, m: Method<'_>) {
 
 /// Returns the types of the JSON bodies of the success responses of `m`,
 /// each model once, and whether a success response can have no body.
-pub(super) fn response(m: Method<'_>) -> (Vec<Type<'_>>, bool) {
+pub(crate) fn response(m: Method<'_>) -> (Vec<Type<'_>>, bool) {
     let mut types = Vec::new();
     let mut optional = false;
     let mut seen: HashSet<Model<'_>> = HashSet::new();
@@ -344,28 +344,28 @@ pub(super) fn response(m: Method<'_>) -> (Vec<Type<'_>>, bool) {
 
 /// The request of a method: its parameters that have a field, and its JSON
 /// body.
-pub(super) struct Request<'f> {
+pub(crate) struct Request<'f> {
     /// The parameters, path parameters first.
-    pub(super) params: Vec<Param<'f>>,
-    pub(super) body: Option<Body<'f>>,
+    pub(crate) params: Vec<Param<'f>>,
+    pub(crate) body: Option<Body<'f>>,
     /// Whether the body's fields sit next to the parameters, rather than in
     /// the field `body`.
-    pub(super) flat: bool,
+    pub(crate) flat: bool,
 }
 
 /// A parameter of a method, and the name of its field in the request.
-pub(super) struct Param<'f> {
-    pub(super) field: Field<'f>,
-    pub(super) name: String,
-    pub(super) location: Location,
+pub(crate) struct Param<'f> {
+    pub(crate) field: Field<'f>,
+    pub(crate) name: String,
+    pub(crate) location: Location,
 }
 
 /// The JSON request body of a method.
-pub(super) struct Body<'f> {
-    pub(super) ty: Type<'f>,
-    pub(super) media_type: &'f str,
-    pub(super) required: bool,
-    pub(super) description: &'f str,
+pub(crate) struct Body<'f> {
+    pub(crate) ty: Type<'f>,
+    pub(crate) media_type: &'f str,
+    pub(crate) required: bool,
+    pub(crate) description: &'f str,
 }
 
 impl<'f> Request<'f> {
@@ -373,7 +373,7 @@ impl<'f> Request<'f> {
     /// query parameter whose name is not valid has no field, and one named
     /// like another parameter gets a `$`. A parameter named `body` next to a
     /// body that is not flat gets a `$` too.
-    fn new(m: Method<'f>) -> Request<'f> {
+    pub(crate) fn new(m: Method<'f>) -> Request<'f> {
         let request = m.request();
         let object = match request {
             Some(Type::Object(object)) => Some(object),
@@ -424,7 +424,7 @@ impl<'f> Request<'f> {
 
     /// Reports whether the request can be left out: no parameter is
     /// required, and an empty object is a body.
-    fn optional(&self) -> bool {
+    pub(crate) fn optional(&self) -> bool {
         let params = !self.params.iter().any(|p| p.field.is_required());
         let body = match &self.body {
             None => true,
@@ -462,11 +462,11 @@ fn response_ident(f: &File, m: Method<'_>) -> Ident {
     f.ident(response_name(m))
 }
 
-pub(super) fn request_name(m: Method<'_>) -> String {
+pub(crate) fn request_name(m: Method<'_>) -> String {
     format!("{}Request", identifier(m.name().pascal()))
 }
 
-pub(super) fn response_name(m: Method<'_>) -> String {
+pub(crate) fn response_name(m: Method<'_>) -> String {
     format!("{}Response", identifier(m.name().pascal()))
 }
 
@@ -476,7 +476,7 @@ pub(super) fn operation_ident(f: &File, m: Method<'_>) -> Ident {
 }
 
 /// Returns the property of a method and a group in the Client.
-fn method_name(m: Method<'_>) -> String {
+pub(crate) fn method_name(m: Method<'_>) -> String {
     identifier(m.name().camel())
 }
 
@@ -500,7 +500,7 @@ fn method_doc(m: Method<'_>) -> String {
 /// Reports whether `m` is left out of the SDK: its request body, or a
 /// success response, has content, and none of it is JSON
 /// (specs/13-non-json-operations.md).
-pub(super) fn skipped(m: Method<'_>) -> bool {
+pub(crate) fn skipped(m: Method<'_>) -> bool {
     if let Some(body) = m.body()
         && body.json().is_none()
         && body.contents().len() > 0

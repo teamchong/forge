@@ -1,0 +1,779 @@
+import assert from 'node:assert/strict';
+import { describe, test } from 'node:test';
+import vm from 'node:vm';
+import {
+  type ApiSchema,
+  type CodeEvaluator,
+  createProgressiveMcp,
+  execute,
+  prepareCodeBody,
+  search,
+  TypeFeedbackError,
+  wrapClient,
+} from '../../../mcp/runtime.js';
+const schema: ApiSchema = {
+  version: '4.0.0',
+  description: 'Example API',
+  baseUrl: 'https://api.example.com/v1',
+  rootChildren: ['dns', 'storage', 'zones'],
+  rootModels: ['SharedError'],
+  groups: {
+    dns: {
+      name: 'dns',
+      path: 'dns',
+      description: 'DNS operations',
+      children: ['records', 'firewall'],
+      models: [],
+      methods: [],
+    },
+    'dns.records': {
+      name: 'records',
+      path: 'dns.records',
+      description: 'Manage DNS records for a zone.',
+      children: [],
+      models: ['dns.records.RecordSettings', 'dns.records.RecordResponse'],
+      methods: [
+        {
+          name: 'create',
+          path: 'dns.records.create',
+          httpMethod: 'POST',
+          route: '/zones/{zoneId}/dns_records',
+          summary: 'Create DNS Record',
+          description: 'Creates a new DNS record for a zone.',
+          deprecated: false,
+          requestTypeName: 'CreateRequest',
+          requestOptional: false,
+          requestFlat: true,
+          requestParams: [
+            {
+              name: 'zoneId',
+              wireName: 'zone_id',
+              required: true,
+              readonly: false,
+              deprecated: false,
+              location: 'path',
+              description: 'Zone identifier.',
+              type: { kind: 'scalar', scalar: 'string' },
+            },
+          ],
+          requestBody: {
+            required: true,
+            description: 'DNS record payload.',
+            type: {
+              kind: 'object',
+              fields: [
+                {
+                  name: 'id',
+                  wireName: 'id',
+                  required: false,
+                  readonly: true,
+                  deprecated: false,
+                  description: 'Record identifier (read-only).',
+                  type: { kind: 'scalar', scalar: 'string' },
+                },
+                {
+                  name: 'name',
+                  wireName: 'name',
+                  required: true,
+                  readonly: false,
+                  deprecated: false,
+                  description: 'DNS record name.',
+                  type: { kind: 'scalar', scalar: 'string' },
+                },
+                {
+                  name: 'type',
+                  wireName: 'type',
+                  required: true,
+                  readonly: false,
+                  deprecated: false,
+                  description: 'DNS record type.',
+                  type: { kind: 'enum', values: ['A', 'AAAA', 'CNAME'] },
+                },
+                {
+                  name: 'ttl',
+                  wireName: 'ttl',
+                  required: false,
+                  readonly: false,
+                  deprecated: false,
+                  description: 'Time to live in seconds.',
+                  type: { kind: 'scalar', scalar: 'number' },
+                },
+                {
+                  name: 'settings',
+                  wireName: 'settings',
+                  required: false,
+                  readonly: false,
+                  deprecated: false,
+                  description: 'Record-specific settings.',
+                  type: { kind: 'model', model: 'dns.records.RecordSettings' },
+                },
+              ],
+            },
+          },
+          responseTypeName: 'CreateResponse',
+          responseType: { kind: 'model', model: 'dns.records.RecordResponse' },
+          responseOptional: false,
+          extensions: { 'x-required-scopes': ['dns:write', 'dns:read'] },
+        },
+        {
+          name: 'list',
+          path: 'dns.records.list',
+          httpMethod: 'GET',
+          route: '/zones/{zoneId}/dns_records',
+          summary: 'List DNS Records',
+          description: 'Lists DNS records in a zone.',
+          deprecated: false,
+          requestTypeName: 'ListRequest',
+          requestOptional: false,
+          requestFlat: true,
+          requestParams: [
+            {
+              name: 'zoneId',
+              wireName: 'zone_id',
+              required: true,
+              readonly: false,
+              deprecated: false,
+              location: 'path',
+              description: 'Zone identifier.',
+              type: { kind: 'scalar', scalar: 'string' },
+            },
+            {
+              name: 'perPage',
+              wireName: 'per_page',
+              required: false,
+              readonly: false,
+              deprecated: false,
+              location: 'query',
+              description: 'Number of records per page.',
+              type: { kind: 'scalar', scalar: 'number' },
+            },
+          ],
+          responseTypeName: 'ListResponse',
+          responseType: {
+            kind: 'array',
+            elem: { kind: 'model', model: 'dns.records.RecordResponse' },
+          },
+          responseOptional: false,
+        },
+      ],
+    },
+    'dns.firewall': {
+      name: 'firewall',
+      path: 'dns.firewall',
+      description: 'DNS Firewall',
+      children: [],
+      models: [],
+      methods: [],
+    },
+    storage: {
+      name: 'storage',
+      path: 'storage',
+      description: 'Object Storage.',
+      children: ['buckets'],
+      models: [],
+      methods: [],
+    },
+    'storage.buckets': {
+      name: 'buckets',
+      path: 'storage.buckets',
+      description: 'Manage storage buckets.',
+      children: [],
+      models: [],
+      methods: [
+        {
+          name: 'create',
+          path: 'storage.buckets.create',
+          httpMethod: 'POST',
+          route: '/orgs/{orgId}/buckets',
+          summary: 'Create Bucket',
+          description: 'Creates a new storage bucket.',
+          deprecated: false,
+          requestTypeName: 'CreateRequest',
+          requestOptional: false,
+          requestFlat: true,
+          requestParams: [
+            {
+              name: 'orgId',
+              wireName: 'org_id',
+              required: true,
+              readonly: false,
+              deprecated: false,
+              location: 'path',
+              description: 'Organization identifier.',
+              type: { kind: 'scalar', scalar: 'string' },
+            },
+          ],
+          requestBody: {
+            required: true,
+            type: {
+              kind: 'object',
+              fields: [
+                {
+                  name: 'name',
+                  wireName: 'name',
+                  required: true,
+                  readonly: false,
+                  deprecated: false,
+                  type: { kind: 'scalar', scalar: 'string' },
+                },
+                {
+                  name: 'storageClass',
+                  wireName: 'storage_class',
+                  required: false,
+                  readonly: false,
+                  deprecated: false,
+                  type: {
+                    kind: 'enum',
+                    values: ['Standard', 'InfrequentAccess'],
+                  },
+                },
+              ],
+            },
+          },
+          responseTypeName: 'CreateResponse',
+          responseType: { kind: 'scalar', scalar: 'unknown' },
+          responseOptional: false,
+          extensions: { 'x-required-scopes': ['storage:write'] },
+        },
+      ],
+    },
+    zones: {
+      name: 'zones',
+      path: 'zones',
+      description: 'Zone management',
+      children: [],
+      models: [],
+      methods: [],
+    },
+  },
+  models: {
+    SharedError: {
+      name: 'SharedError',
+      path: 'SharedError',
+      schemaName: 'SharedError',
+      description: 'Standard error payload.',
+      deprecated: false,
+      type: {
+        kind: 'object',
+        fields: [
+          {
+            name: 'code',
+            wireName: 'code',
+            required: true,
+            readonly: false,
+            deprecated: false,
+            type: { kind: 'scalar', scalar: 'number' },
+          },
+        ],
+      },
+    },
+    'dns.records.RecordSettings': {
+      name: 'RecordSettings',
+      path: 'dns.records.RecordSettings',
+      schemaName: 'RecordSettings',
+      description: 'Extra settings for a DNS record.',
+      deprecated: false,
+      type: {
+        kind: 'object',
+        fields: [
+          {
+            name: 'ipv4Only',
+            wireName: 'ipv4_only',
+            required: false,
+            readonly: false,
+            deprecated: false,
+            description: 'Only resolve IPv4.',
+            type: { kind: 'scalar', scalar: 'boolean' },
+          },
+          {
+            name: 'flattenCname',
+            wireName: 'flatten_cname',
+            required: false,
+            readonly: false,
+            deprecated: false,
+            description: 'Flatten CNAME at apex.',
+            type: { kind: 'scalar', scalar: 'boolean' },
+          },
+        ],
+      },
+    },
+    'dns.records.RecordResponse': {
+      name: 'RecordResponse',
+      path: 'dns.records.RecordResponse',
+      schemaName: 'Record',
+      description: 'Created DNS record.',
+      deprecated: false,
+      type: {
+        kind: 'object',
+        fields: [
+          {
+            name: 'id',
+            wireName: 'id',
+            required: true,
+            readonly: true,
+            deprecated: false,
+            type: { kind: 'scalar', scalar: 'string' },
+          },
+          {
+            name: 'name',
+            wireName: 'name',
+            required: true,
+            readonly: false,
+            deprecated: false,
+            type: { kind: 'scalar', scalar: 'string' },
+          },
+          {
+            name: 'settings',
+            wireName: 'settings',
+            required: false,
+            readonly: false,
+            deprecated: false,
+            type: { kind: 'model', model: 'dns.records.RecordSettings' },
+          },
+        ],
+      },
+    },
+  },
+};
+
+function makeFakeClient() {
+  const calls: { method: string; args: unknown[] }[] = [];
+  const client = {
+    dns: {
+      records: {
+        async create(req?: Record<string, unknown>, ...rest: unknown[]) {
+          calls.push({ method: 'dns.records.create', args: [req, ...rest] });
+          return { id: 'rec_123', ...req };
+        },
+        async list(...args: unknown[]) {
+          calls.push({ method: 'dns.records.list', args });
+          return [{ id: 'rec_123', name: 'example.com' }];
+        },
+      },
+      firewall: {},
+    },
+    storage: {
+      buckets: {
+        async create(req?: Record<string, unknown>, ...rest: unknown[]) {
+          calls.push({ method: 'storage.buckets.create', args: [req, ...rest] });
+          return { name: req?.['name'], orgId: req?.['orgId'] };
+        },
+      },
+    },
+    zones: {},
+  };
+  return { client, calls };
+}
+
+describe('Progressive Type-Feedback MCP runtime', () => {
+  test('search() at root renders 1-level top namespaces without dumping nested methods', () => {
+    const out = search(schema);
+    assert.match(out, /export interface Client \{/);
+    assert.match(out, /readonly dns: dns\.Client;/);
+    assert.match(out, /readonly zones: zones\.Client;/);
+    assert.doesNotMatch(out, /CreateRequest/);
+  });
+
+  test('search() on namespace renders 1-level sub-groups and method signatures', () => {
+    const dnsOut = search(schema, 'dns');
+    assert.match(dnsOut, /export namespace dns \{/);
+    assert.match(dnsOut, /readonly records: dns\.records\.Client;/);
+
+    const recordsOut = search(schema, 'dns.records');
+    assert.match(recordsOut, /export namespace dns\.records \{/);
+    assert.match(recordsOut, /create\(request: CreateRequest, options\?: RequestOptions\): Promise<CreateResponse>;/);
+    assert.match(recordsOut, /list\(request: ListRequest, options\?: RequestOptions\): Promise<ListResponse>;/);
+    // Nested model fields are NOT inlined in the namespace view
+    assert.doesNotMatch(recordsOut, /flattenCname/);
+  });
+
+  test('search() on method renders 1-level request/response types and keeps nested models nominal', () => {
+    const createOut = search(schema, 'dns.records.create');
+    assert.match(createOut, /export interface CreateRequest \{/);
+    assert.match(createOut, /zoneId: string; \/\/ path param/);
+    assert.match(createOut, /type: 'A' \| 'AAAA' \| 'CNAME';/);
+    assert.match(createOut, /settings\?: dns\.records\.RecordSettings;/);
+    // RecordSettings fields are nominal until inspected
+    assert.doesNotMatch(createOut, /flattenCname/);
+    assert.match(createOut, /Referenced models \(use search\("<model>"\) to inspect\): .*dns\.records\.RecordSettings/);
+  });
+
+  test('search() on model (qualified or unqualified) expands its 1-level fields', () => {
+    const byFull = search(schema, 'dns.records.RecordSettings');
+    const byShort = search(schema, 'RecordSettings');
+    assert.equal(byFull, byShort);
+    assert.match(byFull, /export interface RecordSettings \{/);
+    assert.match(byFull, /ipv4Only\?: boolean;/);
+    assert.match(byFull, /flattenCname\?: boolean;/);
+  });
+
+  test('search() on unknown symbol returns compiler-style error and fuzzy suggestions', () => {
+    const unknownMember = search(schema, 'dns.records.creat');
+    assert.match(unknownMember, /TS2339: Symbol 'dns\.records\.creat' does not exist on 'dns\.records'\./);
+    assert.match(unknownMember, /Did you mean: 'dns\.records\.create'/);
+  });
+
+  test('execute() inspects uninvoked namespaces, methods, and models directly like a REPL', async () => {
+    const { client, calls } = makeFakeClient();
+    const groupInspect = await execute(client, schema, 'client.dns.records');
+    assert.equal(groupInspect.ok, true);
+    assert.match(String(groupInspect.result), /export namespace dns\.records \{/);
+
+    const methodInspect = await execute(client, schema, 'client.dns.records.create');
+    assert.equal(methodInspect.ok, true);
+    assert.match(String(methodInspect.result), /export interface CreateRequest \{/);
+
+    const modelInspect = await execute(client, schema, 'client.dns.records.RecordSettings');
+    assert.equal(modelInspect.ok, true);
+    assert.match(String(modelInspect.result), /export interface RecordSettings \{/);
+    assert.equal(calls.length, 0);
+  });
+  test('execute() runs valid SDK calls against wrapped client', async () => {
+    const { client, calls } = makeFakeClient();
+    const res = await execute(
+      client,
+      schema,
+      `return await client.dns.records.create({
+        zoneId: 'zone_1',
+        name: 'app.example.com',
+        type: 'A',
+        settings: { ipv4Only: true }
+      });`,
+    );
+    assert.equal(res.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]?.method, 'dns.records.create');
+    assert.deepEqual(res.result, {
+      id: 'rec_123',
+      zoneId: 'zone_1',
+      name: 'app.example.com',
+      type: 'A',
+      settings: { ipv4Only: true },
+    });
+  });
+
+  test('execute() catches unknown method name with TS2339 and attaches namespace .d.ts definition', async () => {
+    const { client, calls } = makeFakeClient();
+    const res = await execute(client, schema, `await client.dns.records.add({ zoneId: 'z1' })`);
+    assert.equal(res.ok, false);
+    assert.equal(calls.length, 0);
+    assert.equal(res.issues?.[0]?.code, 'TS2339');
+    assert.match(res.error ?? '', /Available on 'dns\.records\.Client': create, list\./);
+    assert.match(res.typeDefinition ?? '', /export namespace dns\.records \{/);
+  });
+
+  test('execute() catches snake_case wireName mistakes with TS2561 and suggests camelCase SDK property', async () => {
+    const { client, calls } = makeFakeClient();
+    const res = await execute(client, schema, `await client.dns.records.list({ zone_id: 'z1', per_page: 10 })`);
+    assert.equal(res.ok, false);
+    assert.equal(calls.length, 0);
+    assert.ok(res.issues?.some((i) => i.code === 'TS2561' && i.message.includes("Did you mean 'zoneId'")));
+    assert.ok(res.issues?.some((i) => i.code === 'TS2561' && i.message.includes("Did you mean 'perPage'")));
+    assert.match(res.typeDefinition ?? '', /export interface ListRequest \{/);
+  });
+
+  test('execute() catches read-only field assignment and nested model type errors with both .d.ts definitions', async () => {
+    const { client, calls } = makeFakeClient();
+    const res = await execute(
+      client,
+      schema,
+      `await client.dns.records.create({
+         zoneId: 'z1',
+         id: 'cannot_set',
+         name: 'example.com',
+         type: 'A',
+         settings: { ipv4Only: 'not_a_boolean' }
+       })`,
+    );
+    assert.equal(res.ok, false);
+    assert.equal(calls.length, 0);
+    assert.ok(res.issues?.some((i) => i.code === 'TS2540' && i.path === 'request.id'));
+    assert.ok(
+      res.issues?.some(
+        (i) =>
+          i.code === 'TS2322' && i.path === 'request.settings.ipv4Only' && i.symbol === 'dns.records.RecordSettings',
+      ),
+    );
+    assert.match(res.typeDefinition ?? '', /export interface CreateRequest \{/);
+    assert.match(res.typeDefinition ?? '', /export interface RecordSettings \{/);
+  });
+
+  test('createProgressiveMcp() exposes search and execute MCP tools', async () => {
+    const { client } = makeFakeClient();
+    const mcp = createProgressiveMcp(client, schema);
+    assert.equal(mcp.tools.length, 2);
+    assert.equal(mcp.tools[0]?.name, 'search');
+    assert.equal(mcp.tools[1]?.name, 'execute');
+
+    const searchRes = mcp.tools[0]!.handler({ code: 'dns.records.RecordSettings' });
+    assert.match(String(searchRes), /export interface RecordSettings \{/);
+    assert.match(
+      String(mcp.search('methods.filter(m => m.summary?.toLowerCase().includes("bucket"))')),
+      /client\.storage\.buckets\.create/,
+    );
+    assert.match(String(mcp.search('storage.buckets.create')), /export interface CreateRequest \{/);
+
+    const wrapped = wrapClient(client, schema);
+    assert.throws(() => Reflect.get(wrapped.dns.records, 'nonExistent'), TypeFeedbackError);
+  });
+
+  test('include(method) filters methods and prunes empty groups across search and execute', async () => {
+    const { client, calls } = makeFakeClient();
+    const readOnlyMcp = createProgressiveMcp(client, schema, {
+      include: (m) => m.httpMethod === 'GET' && !m.deprecated,
+    });
+
+    // storage.buckets only has POST create, so the entire storage tree is pruned
+    const rootDts = String(readOnlyMcp.search());
+    assert.match(rootDts, /readonly dns: dns\.Client/);
+    assert.doesNotMatch(rootDts, /storage/);
+
+    // dns.records only exposes GET list (POST create is hidden)
+    const dnsRecordsDts = String(readOnlyMcp.search('dns.records'));
+    assert.match(dnsRecordsDts, /list\(request: ListRequest/);
+    assert.doesNotMatch(dnsRecordsDts, /create\(/);
+
+    // Calling an excluded method in execute() is rejected pre-flight with TS2339 (0 HTTP calls)
+    const blockedRes = await readOnlyMcp.execute(
+      'return await client.dns.records.create({ zoneId: "z1", name: "a.com", type: "A" })',
+    );
+    assert.equal(blockedRes.ok, false);
+    assert.equal(calls.length, 0);
+    if (!blockedRes.ok) {
+      assert.equal(blockedRes.issues?.[0]?.code, 'TS2339');
+      assert.doesNotMatch(blockedRes.typeDefinition ?? '', /create\(/);
+    }
+
+    // Calling an included method succeeds
+    const allowedRes = await readOnlyMcp.execute(
+      'return await client.dns.records.list({ zoneId: "z1" })',
+    );
+    assert.equal(allowedRes.ok, true);
+    assert.equal(calls.length, 1);
+  });
+
+  test('search() executes code-based queries against methods, groups, models, and client', () => {
+    const byCode = search(schema, 'methods.filter(m => m.route.includes("/buckets"))');
+    assert.match(byCode, /client\.storage\.buckets\.create/);
+
+    const byFind = search(schema, 'methods.find(m => m.route.includes("/buckets"))');
+    assert.match(byFind, /export interface CreateRequest \{/);
+
+    const multiMatch = search(schema, 'methods.filter(m => m.group === "dns.records")');
+    assert.match(multiMatch, /2 matching methods - search\("<methodPath>"\) for full request\/response \.d\.ts\):/);
+    assert.match(multiMatch, /list\(request: ListRequest/);
+  });
+  test('flattens nested union-of-models request bodies into a single CreateRequest and prefers TS2561 across union branches', async () => {
+    const unionSchema: ApiSchema = {
+      ...schema,
+      rootChildren: [...schema.rootChildren, 'apps'],
+      groups: {
+        ...schema.groups,
+        apps: {
+          name: 'apps',
+          path: 'apps',
+          children: [],
+          models: ['apps.AppRequest', 'apps.SelfHostedApp', 'apps.SaasApp'],
+          methods: [
+            {
+              name: 'create',
+              path: 'apps.create',
+              httpMethod: 'POST',
+              route: '/accounts/{accountId}/apps',
+              requestTypeName: 'CreateRequest',
+              requestOptional: false,
+              requestFlat: true,
+              requestParams: [
+                {
+                  name: 'accountId',
+                  wireName: 'account_id',
+                  required: true,
+                  readonly: false,
+                  location: 'path',
+                  type: { kind: 'scalar', scalar: 'string' },
+                },
+              ],
+              requestBody: {
+                required: true,
+                type: { kind: 'model', model: 'apps.AppRequest' },
+              },
+              responseTypeName: 'CreateResponse',
+              responseType: { kind: 'scalar', scalar: 'unknown' },
+            },
+          ],
+        },
+      },
+      models: {
+        ...schema.models,
+        'apps.AppRequest': {
+          name: 'AppRequest',
+          path: 'apps.AppRequest',
+          schemaName: 'app_request',
+          type: {
+            kind: 'union',
+            members: [
+              { kind: 'model', model: 'apps.SelfHostedApp' },
+              { kind: 'model', model: 'apps.SaasApp' },
+            ],
+          },
+        },
+        'apps.SelfHostedApp': {
+          name: 'SelfHostedApp',
+          path: 'apps.SelfHostedApp',
+          schemaName: 'self_hosted_app',
+          type: {
+            kind: 'object',
+            fields: [
+              {
+                name: 'name',
+                wireName: 'name',
+                required: true,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+              {
+                name: 'domain',
+                wireName: 'domain',
+                required: true,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+              {
+                name: 'sessionDuration',
+                wireName: 'session_duration',
+                required: false,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+            ],
+          },
+        },
+        'apps.SaasApp': {
+          name: 'SaasApp',
+          path: 'apps.SaasApp',
+          schemaName: 'saas_app',
+          type: {
+            kind: 'object',
+            fields: [
+              {
+                name: 'name',
+                wireName: 'name',
+                required: false,
+                readonly: false,
+                type: { kind: 'scalar', scalar: 'string' },
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    const dts = search(unionSchema, 'apps.create');
+    assert.match(dts, /export interface CreateRequest \{[\s\S]*accountId: string;[\s\S]*sessionDuration\?: string;/);
+    assert.doesNotMatch(dts, /export interface AppRequest \{/);
+
+    const okRes = await execute(
+      { apps: { async create(req: unknown) { return req; } } },
+      unionSchema,
+      'return await client.apps.create({ accountId: "a1", name: "app", sessionDuration: "24h" })',
+    );
+    assert.equal(okRes.ok, true);
+
+    const errRes = await execute(
+      { apps: { async create() {} } },
+      unionSchema,
+      'await client.apps.create({ accountId: "a1", name: "app", session_duration: "24h" })',
+    );
+    assert.equal(errRes.ok, false);
+    if (!errRes.ok) {
+      assert.ok(errRes.issues?.some((i) => i.code === 'TS2561'));
+      assert.match(errRes.error, /Did you mean 'sessionDuration'/);
+      assert.doesNotMatch(errRes.typeDefinition ?? '', /export interface AppRequest \{/);
+    }
+  });
+
+  test('search() normalizes .Client / () / snake_case symbols, matches HTTP verb + route, and scopes suggestions to parent group', () => {
+    const fromClientSuffix = search(schema, 'dns.records.Client');
+    assert.match(fromClientSuffix, /export namespace dns\.records \{/);
+
+    const fromCallExpr = search(schema, 'await client.dns.records.create()');
+    assert.match(fromCallExpr, /\/\/ Method: client\.dns\.records\.create/);
+    assert.doesNotMatch(fromCallExpr, /list\(request: ListRequest/);
+
+    const fromVerbRoute = search(schema, 'POST /zones/{zoneId}/dns_records');
+    assert.match(fromVerbRoute, /\/\/ Method: client\.dns\.records\.create/);
+    assert.doesNotMatch(fromVerbRoute, /list\(request: ListRequest/);
+
+    const scopedErr = search(schema, 'dns.records.nonexistent');
+    assert.match(scopedErr, /Did you mean: 'dns\.records\.create'/);
+  });
+
+  test('execute() awaits multi-line expressions and returns the trailing expression in multi-statement snippets', async () => {
+    const { client, calls } = makeFakeClient();
+    const res = await execute(
+      client,
+      schema,
+      'const rows = await client.dns.records.list({ zoneId: "z1" });\nconst first = rows[0];\n({ count: rows.length, id: first?.id })',
+    );
+    assert.equal(res.ok, true);
+    assert.equal(calls.length, 1);
+    if (res.ok) {
+      assert.deepEqual(res.result, { count: 1, id: 'rec_123' });
+    }
+  });
+
+  test('supports custom evaluator sandbox and evaluator: false for Cloudflare Workers / zero-eval hosts', async () => {
+    // Pure lexical prepareCodeBody() never calls new Function()
+    assert.equal(
+      prepareCodeBody('const z = await client.zones.list();\nz[0]'),
+      'const z = await client.zones.list();\nreturn (\nz[0]\n);',
+    );
+
+    // evaluator: false still allows symbol lookup and HTTP route lookup in search()
+    const noEvalMcp = createProgressiveMcp(makeFakeClient().client, schema, {
+      evaluator: false,
+    });
+    const symOut = await noEvalMcp.search('client.dns.records.create');
+    assert.match(symOut, /export interface CreateRequest \{/);
+    const routeOut = await noEvalMcp.search('POST /zones/{zoneId}/dns_records');
+    assert.match(routeOut, /\/\/ Method: client\.dns\.records\.create/);
+    const blockedSearch = await noEvalMcp.search('methods.filter(m => true)');
+    assert.match(blockedSearch, /Arbitrary JavaScript evaluation in search\(\) is disabled/);
+    const blockedExec = await noEvalMcp.execute('await client.dns.records.list({ zoneId: "z1" })');
+    assert.equal(blockedExec.ok, false);
+    if (!blockedExec.ok) {
+      assert.match(blockedExec.error, /Dynamic JavaScript string evaluation in execute\(\) is disabled/);
+    }
+
+    // Pluggable evaluator runs search() and execute() inside an isolated VM context without host globals
+    const vmEvaluator: CodeEvaluator = (_code, globals, functionBody) => {
+      const ctx = vm.createContext({ ...globals });
+      return vm.runInContext(`(async () => {\n${functionBody}\n})()`, ctx);
+    };
+    const { client, calls } = makeFakeClient();
+    const sandboxedMcp = createProgressiveMcp(client, schema, {
+      evaluator: vmEvaluator,
+    });
+
+    const vmSearchOut = await sandboxedMcp.search(
+      'methods.filter(m => m.route.includes("/buckets"))',
+    );
+    assert.match(vmSearchOut, /client\.storage\.buckets\.create/);
+
+    const vmExecRes = await sandboxedMcp.execute(
+      'const rows = await client.dns.records.list({ zoneId: "z1" }); rows[0].name',
+    );
+    assert.equal(vmExecRes.ok, true);
+    assert.equal(calls.length, 1);
+    if (vmExecRes.ok) {
+      assert.equal(vmExecRes.result, 'example.com');
+    }
+
+    // Host process globals are not reachable inside the VM sandbox
+    const leakAttempt = await sandboxedMcp.execute('typeof process');
+    assert.equal(leakAttempt.ok, true);
+    if (leakAttempt.ok) {
+      assert.equal(leakAttempt.result, 'undefined');
+    }
+  });
+});
